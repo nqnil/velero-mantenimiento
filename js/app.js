@@ -9,7 +9,7 @@ import {
   readLocalDump, clearLocalData, COLLECTIONS,
 } from './store.js';
 
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.2.0';
 const repo = new Repo();
 const $view = document.getElementById('view');
 const $sync = document.getElementById('sync');
