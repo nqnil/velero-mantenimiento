@@ -2,19 +2,20 @@ import { DEFAULT_TASKS, DEFAULT_SETTINGS, SYSTEMS } from './tasks-default.js';
 import {
   todayStr, addMonths, daysBetween, currentHours, usageRate, allStatuses, sortStatuses,
   taskStatus, lastInterventionFor, interventionCost, buildICS, isNum, num, parseNum, round1,
-  fmtDate, fmtMoney, fmtHours,
+  fmtDate, fmtMoney, fmtHours, hourPoints, sanitizeRecord, tripEngineHours, tripDays, tripStats, fuelCost, fuelConsumption,
 } from './logic.js';
 import {
   Repo, uid, cloudConfigured, currentUser, signIn, signUp, resetPassword, signOutCloud,
-  readLocalDump, COLLECTIONS,
+  readLocalDump, clearLocalData, COLLECTIONS,
 } from './store.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.1';
 const repo = new Repo();
 const $view = document.getElementById('view');
 const $sync = document.getElementById('sync');
 let seededCloud = false;
 let draft = null; // formulario de intervención en curso
+let tripDraft = null; // formulario de navegación o repostaje en curso
 let lastRoute = '';
 
 // ───────────────────────── Utilidades ─────────────────────────
@@ -42,7 +43,7 @@ function toast(msg) {
   el.textContent = msg;
   el.hidden = false;
   clearTimeout(toast.t);
-  toast.t = setTimeout(() => (el.hidden = true), 2600);
+  toast.t = setTimeout(() => (el.hidden = true), Math.min(9000, 2200 + msg.length * 45));
 }
 
 function go(hash) {
@@ -84,6 +85,7 @@ function relDays(d) {
 function dueText(s) {
   if (s.status === 'nohistory') return 'Sin registro';
   if (s.status === 'inactive') return 'Desactivada';
+  if (s.noDate) return s.task.type === 'caducidad' ? 'Falta la fecha de caducidad' : 'Faltan datos para calcularla';
   const parts = [];
   if (s.hoursLeft !== null) {
     if (s.hoursLeft <= 0) parts.push(`pasada ${fmtHours(-s.hoursLeft)}`);
@@ -127,15 +129,16 @@ async function boot() {
   registerSW();
   window.addEventListener('online', updateSyncBadge);
   window.addEventListener('offline', updateSyncBadge);
+  // Pide al navegador que no borre los datos de la app para liberar espacio
+  navigator.storage?.persist?.().catch(() => {});
 
   let usedCloud = false;
   if (localStorage.getItem('velero.mode') === 'cloud' && cloudConfigured()) {
     try {
       const user = await currentUser();
       if (user) {
-        const r = await repo.useCloud(user);
+        await repo.useCloud(user);
         usedCloud = true;
-        if (r.fresh) await ensureDefaults();
       }
     } catch (e) {
       console.error(e);
@@ -146,18 +149,129 @@ async function boot() {
     await ensureDefaults();
   }
 
-  repo.onChange((state, sync) => {
+  repo.onChange(() => {
     updateSyncBadge();
-    if (sync.mode === 'cloud' && sync.serverConfirmed && !seededCloud) {
-      seededCloud = true;
-      ensureDefaults();
-    }
+    checkCloudSeed();
     scheduleRender();
   });
-  window.addEventListener('hashchange', () => render(true));
+  checkCloudSeed();
+  window.addEventListener('hashchange', onHashChange);
   document.addEventListener('click', onClick);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeViewer();
+  });
   updateSyncBadge();
+  currentHash = location.hash;
   render(true);
+}
+
+// En la nube, las tareas por defecto solo se crean cuando el servidor ha confirmado
+// lo que ya hay (si no, otro dispositivo sin sincronizar podría pisar datos).
+function checkCloudSeed() {
+  const sync = repo.sync;
+  if (sync.mode === 'cloud' && sync.serverConfirmed && !seededCloud) {
+    seededCloud = true;
+    ensureDefaults();
+  }
+}
+
+// ───────────────────────── Navegación y borradores ─────────────────────────
+let currentHash = '';
+let formDirty = false;
+const DRAFT_PREFIX = 'velero.draft:';
+
+function onHashChange() {
+  if (formDirty && location.hash !== currentHash) {
+    if (!confirm('Tienes cambios sin guardar. ¿Salir y descartarlos?')) {
+      history.replaceState(null, '', currentHash || '#/');
+      return;
+    }
+    dropStoredDraft(currentHash);
+  }
+  formDirty = false;
+  currentHash = location.hash;
+  closeViewer();
+  render(true);
+  $view.focus({ preventScroll: true });
+}
+
+function markDirty(d) {
+  formDirty = true;
+  if (d) storeDraft(d);
+}
+
+function formSaved(key) {
+  formDirty = false;
+  dropStoredDraft(key);
+}
+
+function storeDraft(d) {
+  clearTimeout(storeDraft.t);
+  storeDraft.t = setTimeout(() => {
+    const o = { ...d, taskIds: d.taskIds ? [...d.taskIds] : undefined };
+    try {
+      sessionStorage.setItem(DRAFT_PREFIX + d.key, JSON.stringify(o));
+    } catch {
+      try { // sin espacio: guardar sin las fotos nuevas
+        sessionStorage.setItem(DRAFT_PREFIX + d.key, JSON.stringify({ ...o, photos: (o.photos || []).filter((p) => p.existing) }));
+      } catch { /* nada */ }
+    }
+  }, 250);
+}
+
+function loadStoredDraft(key) {
+  try {
+    const o = JSON.parse(sessionStorage.getItem(DRAFT_PREFIX + key) || 'null');
+    if (!o || typeof o !== 'object') return null;
+    if (Array.isArray(o.taskIds)) o.taskIds = new Set(o.taskIds);
+    formDirty = true;
+    return o;
+  } catch {
+    return null;
+  }
+}
+
+function dropStoredDraft(key) {
+  clearTimeout(storeDraft.t); // que un guardado pendiente no lo resucite
+  try { sessionStorage.removeItem(DRAFT_PREFIX + key); } catch { /* nada */ }
+}
+
+// Evita guardar dos veces con un doble toque
+async function guarded(form, fn) {
+  if (form.dataset.busy) return;
+  form.dataset.busy = '1';
+  const btns = form.querySelectorAll('button[type=submit]');
+  btns.forEach((b) => (b.disabled = true));
+  try {
+    await fn();
+  } finally {
+    delete form.dataset.busy;
+    btns.forEach((b) => (b.disabled = false));
+  }
+}
+
+// Comprueba que unas horas de motor encajan con las lecturas de alrededor.
+// Devuelve un aviso (texto) o null.
+function hoursWarning(hours, date) {
+  const pts = hourPoints(repo.state);
+  let before = null, after = null;
+  for (const p of pts) {
+    if (p.date <= date) before = p;
+    else if (!after) after = p;
+  }
+  if (before) {
+    const days = Math.max(1, daysBetween(before.date, date));
+    if (hours < before.hours - 0.05 && before.date < date) return `Es menos que la lectura del ${fmtDate(before.date)} (${fmtHours(before.hours)}).`;
+    if (hours > before.hours + 24 * days) return `Son ${fmtHours(round1(hours - before.hours))} más que la lectura del ${fmtDate(before.date)}: más de las que caben en ese tiempo.`;
+  }
+  if (after && hours > after.hours + 0.05) return `Es más que la lectura posterior del ${fmtDate(after.date)} (${fmtHours(after.hours)}).`;
+  return null;
+}
+
+function confirmHours(hours, date) {
+  if (hours === null) return true;
+  const w = hoursWarning(hours, date);
+  return !w || confirm(`${w} ¿Guardar ${fmtHours(hours)} igualmente?`);
 }
 
 // Añade las tareas del catálogo que falten (también las que traigan versiones nuevas).
@@ -181,12 +295,15 @@ function scheduleRender() {
 }
 
 // Las pantallas con formulario no se repintan solas, para no perder lo que escribes.
-const FORM_ROUTES = new Set(['registrar', 'editar-intervencion', 'editar-tarea', 'ajustes', 'nueva-tarea']);
+const FORM_ROUTES = new Set(['registrar', 'editar-intervencion', 'editar-tarea', 'ajustes', 'nueva-tarea', 'navegar', 'editar-navegacion', 'repostar', 'editar-repostaje']);
 
 function render(force) {
   const r = route();
   const formKey = formRouteKey(r);
   if (!force && FORM_ROUTES.has(formKey)) return;
+  // Un formulario que se abandona no debe reaparecer relleno la próxima vez
+  if (draft && draft.key !== location.hash) draft = null;
+  if (tripDraft && tripDraft.key !== location.hash) tripDraft = null;
   const routeId = location.hash;
   const scroll = routeId === lastRoute ? window.scrollY : 0;
   lastRoute = routeId;
@@ -204,6 +321,14 @@ function render(force) {
     case 'nueva-tarea': html = viewTaskEdit(null); break;
     case 'horas': html = viewHours(); break;
     case 'ajustes': html = viewSettings(); break;
+    case 'nuevo': html = viewNew(); break;
+    case 'bitacora': html = viewLogbook(r); break;
+    case 'navegacion': html = viewTrip(r.parts[1]); break;
+    case 'navegar': html = viewTripForm(r); break;
+    case 'editar-navegacion': html = viewTripForm(r, r.parts[1]); break;
+    case 'repostaje': html = viewFuel(r.parts[1]); break;
+    case 'repostar': html = viewFuelForm(r); break;
+    case 'editar-repostaje': html = viewFuelForm(r, r.parts[1]); break;
     default: html = viewHome();
   }
   $view.innerHTML = html;
@@ -216,11 +341,18 @@ function formRouteKey(r) {
   if (a === 'intervencion' && c === 'editar') return 'editar-intervencion';
   if (a === 'tarea' && b === 'nueva') return 'nueva-tarea';
   if (a === 'tarea' && c === 'editar') return 'editar-tarea';
+  if (a === 'navegacion' && c === 'editar') return 'editar-navegacion';
+  if (a === 'repostaje' && c === 'editar') return 'editar-repostaje';
   return a || '';
 }
 
 function setNav(key) {
-  const map = { '': 'home', tarea: 'home', horas: 'home', historial: 'log', intervencion: 'log', tareas: 'tasks', ajustes: 'gear', registrar: 'add' };
+  const map = {
+    '': 'home', tarea: 'home', horas: 'home', tareas: 'home',
+    bitacora: 'trips', navegacion: 'trips', navegar: 'add',
+    historial: 'log', intervencion: 'log', repostaje: 'log',
+    ajustes: 'gear', registrar: 'add', nuevo: 'add', repostar: 'add',
+  };
   const cur = map[key] || 'home';
   document.querySelectorAll('[data-nav]').forEach((a) => {
     if (a.dataset.nav === cur) a.setAttribute('aria-current', 'page');
@@ -277,6 +409,13 @@ function viewHome() {
     <a class="meter-link" href="#/horas">Ver lecturas anteriores</a>
   </section>
 
+  <div class="quick">
+    <a class="btn primary" href="#/navegar">Registrar navegación</a>
+    <a class="btn" href="#/repostar">Repostaje</a>
+    <a class="btn" href="#/registrar">Mantenimiento</a>
+  </div>
+  ${lastTripLine()}
+
   ${blank ? `
   <section class="notice">
     <h2>Para empezar</h2>
@@ -298,7 +437,14 @@ function viewHome() {
     <summary><h2 class="grp ok">Al día <span class="count">${groups.ok.length}</span></h2></summary>
     ${list(groups.ok)}
   </details>` : ''}
+  <p class="more"><a href="#/tareas">Ver y editar todas las tareas</a></p>
   `;
+}
+
+function lastTripLine() {
+  const t = [...repo.state.trips].sort(byDateDesc)[0];
+  if (!t) return '';
+  return `<p class="lasttrip">Última navegación: <a href="#/navegacion/${encodeURIComponent(t.id)}">${fmtDate(t.date)}, ${esc(tripRoute(t))}</a></p>`;
 }
 
 function meterDigits(hours) {
@@ -341,6 +487,8 @@ function viewTask(id) {
   if (s.dueDate) facts.push([t.type === 'caducidad' ? 'Caduca / próxima revisión' : 'Próxima por fecha', `${fmtDate(s.dueDate)} (${relDays(s.daysLeft)})`]);
   if (s.dueHours !== null) facts.push(['Próxima por horas', `a las ${fmtHours(s.dueHours)}${s.hoursLeft !== null ? `, ${s.hoursLeft > 0 ? 'faltan ' + fmtHours(s.hoursLeft) : 'pasada ' + fmtHours(-s.hoursLeft)}` : ''}`]);
   if (s.estDateFromHours && s.hoursLeft > 0) facts.push(['Estimación por uso', `hacia el ${fmtDate(s.estDateFromHours)}`]);
+  if (s.hoursEstimated) facts.push(['Horas', 'El último registro no tiene horas de motor: se han estimado con tus lecturas de esa época.']);
+  if (s.noDate) facts.push(['Próxima', t.type === 'caducidad' ? 'Falta la fecha de caducidad: registra la tarea de nuevo anotándola, o pon un intervalo en meses.' : 'Faltan datos para calcularla.']);
   if (s.missingHours) facts.push(['Horas', 'El último registro no tiene horas de motor: no se puede calcular el aviso por horas.']);
 
   return `
@@ -400,41 +548,73 @@ function logRow(i) {
 }
 
 function viewHistory(r) {
-  const all = [...repo.state.interventions].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
-  const years = [...new Set(all.map((i) => i.date.slice(0, 4)))].sort().reverse();
-  const year = r.params.get('anio') || (years[0] || '');
-  const list = year === 'todo' ? all : all.filter((i) => i.date.startsWith(year));
-  const total = list.reduce((s, i) => s + interventionCost(i), 0);
-  const bySys = {};
-  for (const i of list) {
-    const k = interventionSystem(i);
-    bySys[k] = (bySys[k] || 0) + interventionCost(i);
+  const kindParam = r.params.get('tipo');
+  const kind = ['todo', 'mantenimiento', 'combustible'].includes(kindParam) ? kindParam : 'todo';
+  const entries = [
+    ...repo.state.interventions.map((i) => ({ kind: 'mant', date: i.date, obj: i, cost: interventionCost(i) })),
+    ...repo.state.fuel.map((f) => ({ kind: 'fuel', date: f.date, obj: f, cost: fuelCost(f) })),
+  ].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  const years = [...new Set(entries.map((e) => e.date.slice(0, 4)))].sort().reverse();
+  let year = r.params.get('anio') || (years[0] || '');
+  if (year !== 'todo' && !years.includes(year)) year = years[0] || '';
+  const inYear = year === 'todo' ? entries : entries.filter((e) => e.date.startsWith(year));
+  const list = kind === 'todo' ? inYear : inYear.filter((e) => e.kind === (kind === 'combustible' ? 'fuel' : 'mant'));
+  const total = list.reduce((s, e) => s + e.cost, 0);
+  const groups = {};
+  for (const e of list) {
+    const k = e.kind === 'fuel' ? 'combustible' : interventionSystem(e.obj);
+    groups[k] = (groups[k] || 0) + e.cost;
   }
-  const sysRows = Object.entries(bySys).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
-  const max = Math.max(1, ...sysRows.map(([, v]) => v));
-  const mine = list.filter((i) => i.doneBy !== 'taller').reduce((s, i) => s + interventionCost(i), 0);
+  const rows = Object.entries(groups).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  const max = Math.max(1, ...rows.map(([, v]) => v));
+  const label = (k) => (k === 'combustible' ? 'Combustible' : k === 'varios' ? 'Varios sistemas' : sysName(k));
+  const mant = list.filter((e) => e.kind === 'mant');
+  const mine = mant.filter((e) => e.obj.doneBy !== 'taller').reduce((s, e) => s + e.cost, 0);
+  const shops = mant.reduce((s, e) => s + e.cost, 0) - mine;
+  const fuelList = list.filter((e) => e.kind === 'fuel').map((e) => e.obj);
+  const liters = fuelList.reduce((s, f) => s + num(f.liters), 0);
+  const cons = fuelConsumption(repo.state.fuel);
+  const q = (k, y) => esc(`#/historial?tipo=${encodeURIComponent(k)}&anio=${encodeURIComponent(y)}`);
 
-  if (!all.length) {
+  if (!entries.length) {
     return `<h1>Historial</h1>
-    <section class="notice"><p>Aún no hay intervenciones. Cada vez que hagas o encargues un mantenimiento, regístralo aquí con la fecha, las horas y el coste.</p>
-    <a class="btn primary" href="#/registrar">Registrar una intervención</a></section>`;
+    <section class="notice"><p>Aún no hay nada registrado. Cada vez que hagas o encargues un mantenimiento, o eches combustible, apúntalo aquí con la fecha y el coste.</p>
+    <div class="actions"><a class="btn primary" href="#/registrar">Registrar mantenimiento</a><a class="btn" href="#/repostar">Registrar repostaje</a></div></section>`;
   }
+
+  const count = list.length;
+  const what = kind === 'combustible' ? (count === 1 ? 'repostaje' : 'repostajes')
+    : kind === 'mantenimiento' ? (count === 1 ? 'intervención' : 'intervenciones')
+    : (count === 1 ? 'apunte' : 'apuntes');
 
   return `
   <h1>Historial</h1>
+  <nav class="chips" aria-label="Tipo">
+    <a href="${q('todo', year)}" ${kind === 'todo' ? 'aria-current="true"' : ''}>Todo</a>
+    <a href="${q('mantenimiento', year)}" ${kind === 'mantenimiento' ? 'aria-current="true"' : ''}>Mantenimiento</a>
+    <a href="${q('combustible', year)}" ${kind === 'combustible' ? 'aria-current="true"' : ''}>Combustible</a>
+  </nav>
   <nav class="chips" aria-label="Año">
-    ${years.map((y) => `<a href="#/historial?anio=${y}" ${y === year ? 'aria-current="true"' : ''}>${y}</a>`).join('')}
-    <a href="#/historial?anio=todo" ${year === 'todo' ? 'aria-current="true"' : ''}>Todo</a>
+    ${years.map((y) => `<a href="${q(kind, y)}" ${y === year ? 'aria-current="true"' : ''}>${esc(y)}</a>`).join('')}
+    <a href="${q(kind, 'todo')}" ${year === 'todo' ? 'aria-current="true"' : ''}>Todos los años</a>
   </nav>
   <section class="spend">
-    <p class="spend-total"><span class="money big">${fmtMoney(total)}</span> en ${list.length} ${list.length === 1 ? 'intervención' : 'intervenciones'}${year === 'todo' ? '' : ` en ${year}`}</p>
-    <p class="muted">Material propio: ${fmtMoney(mine)}. Talleres: ${fmtMoney(total - mine)}.</p>
-    ${sysRows.length ? `<ul class="bars">${sysRows.map(([k, v]) => `
-      <li><span class="bar-label">${esc(k === 'varios' ? 'Varios sistemas' : sysName(k))}</span>
-      <span class="bar"><span style="width:${Math.max(2, (v / max) * 100)}%"></span></span>
+    <p class="spend-total"><span class="money big">${fmtMoney(total)}</span> en ${count} ${what}${year === 'todo' ? '' : ` en ${year}`}</p>
+    ${kind !== 'combustible' && mant.length ? `<p class="muted">Mantenimiento: material propio ${fmtMoney(mine)}, talleres ${fmtMoney(shops)}.</p>` : ''}
+    ${kind !== 'mantenimiento' && fuelList.length ? `<p class="muted">Combustible: ${fmtNum(liters)} L${pplText(fuelList)}.${cons ? ` Consumo medio del motor: ${fmtNum(cons.lph, 2)} L/h.` : ''}</p>` : ''}
+    ${rows.length > 1 || (rows.length === 1 && kind === 'todo') ? `<ul class="bars">${rows.map(([k, v]) => `
+      <li><span class="bar-label">${esc(label(k))}</span>
+      <span class="bar"><span class="${k === 'combustible' ? 'fuelbar' : ''}" style="width:${Math.max(2, (v / max) * 100)}%"></span></span>
       <span class="money">${fmtMoney(v)}</span></li>`).join('')}</ul>` : ''}
   </section>
-  <ul class="log">${list.map(logRow).join('')}</ul>`;
+  ${list.length ? `<ul class="log">${list.map((e) => (e.kind === 'fuel' ? fuelRow(e.obj) : logRow(e.obj))).join('')}</ul>`
+    : '<p class="muted">Nada registrado con este filtro.</p>'}`;
+}
+
+function pplText(list) {
+  const both = list.filter((f) => num(f.liters) > 0 && num(f.total) > 0);
+  const l = both.reduce((s, f) => s + num(f.liters), 0);
+  return l ? `, a ${fmtMoney(both.reduce((s, f) => s + num(f.total), 0) / l)} el litro de media` : '';
 }
 
 function viewIntervention(id) {
@@ -471,15 +651,27 @@ function multiTitle(i, tasks) {
   return sys === 'varios' ? `${tasks.length} tareas de mantenimiento` : `${tasks.length} tareas: ${sysName(sys).toLowerCase()}`;
 }
 
+const photoCache = new Map();
+
 async function loadThumbs() {
   const btns = document.querySelectorAll('#thumbs .thumb');
   for (const b of btns) {
     const p = await repo.getPhoto(b.dataset.id);
     if (!b.isConnected) return;
     if (!p) { b.innerHTML = '<span class="ph-loading">No disponible sin conexión</span>'; continue; }
-    b.innerHTML = p.mime === 'application/pdf'
-      ? `<span class="pdf">PDF<br>${esc(p.name || '')}</span>`
-      : `<img src="${p.data}" alt="Factura">`;
+    photoCache.set(p.id, p);
+    if (p.mime === 'application/pdf') {
+      // Enlace de verdad: en iPhone, abrir un PDF tras una espera lo bloquea el navegador
+      const a = document.createElement('a');
+      a.className = 'thumb';
+      a.href = pdfUrl(p.data);
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.innerHTML = `<span class="pdf">PDF<br>${esc(p.name || '')}</span>`;
+      b.replaceWith(a);
+    } else {
+      b.innerHTML = `<img src="${esc(p.data)}" alt="Factura">`;
+    }
   }
 }
 
@@ -505,7 +697,8 @@ function newDraft(r, existing) {
       filter: '',
     };
   }
-  const pre = r.params.get('tarea');
+  const preId = r.params.get('tarea');
+  const pre = preId && taskById(preId) ? preId : null;
   const cur = currentHours(repo.state);
   return {
     id: uid(),
@@ -535,7 +728,7 @@ function viewRegister(r, editId) {
   }
   const key = location.hash;
   if (!draft || draft.key !== key) {
-    draft = newDraft(r, existing);
+    draft = loadStoredDraft(key) || newDraft(r, existing);
     draft.key = key;
   }
   const d = draft;
@@ -553,7 +746,7 @@ function viewRegister(r, editId) {
     <fieldset class="picker">
       <legend>Tareas realizadas <span class="count" id="sel-count">${d.taskIds.size}</span></legend>
       <div id="sel-chips" class="selchips">${selChips()}</div>
-      <input type="search" id="task-filter" placeholder="Buscar tarea (aceite, balsa, winches…)" value="${esc(d.filter)}" autocomplete="off">
+      <input type="search" id="task-filter" aria-label="Buscar tarea" enterkeyhint="search" placeholder="Buscar tarea (aceite, balsa, winches…)" value="${esc(d.filter)}" autocomplete="off">
       <div class="picklist" id="picklist">${pickList()}</div>
     </fieldset>
 
@@ -623,7 +816,7 @@ function costBlock() {
       </div>
       <div class="thumbs" id="draft-photos">${draftPhotos()}</div>
       <label class="btn file">${ICON.cam}<span>Añadir foto o PDF de la factura</span>
-        <input type="file" id="photo-input" accept="image/*,application/pdf" multiple hidden></label>
+        <input type="file" id="photo-input" class="sr" accept="image/*,application/pdf" multiple></label>
     </fieldset>`;
   }
   const total = d.materials.reduce((s, m) => s + num(m.cost), 0);
@@ -642,7 +835,7 @@ function costBlock() {
 function draftPhotos() {
   return draft.photos.map((p, idx) => `
     <div class="thumb" data-ph="${idx}">
-      ${p.data ? (p.mime === 'application/pdf' ? `<span class="pdf">PDF<br>${esc(p.name || '')}</span>` : `<img src="${p.data}" alt="Factura ${idx + 1}">`) : '<span class="ph-loading">Cargando…</span>'}
+      ${p.data ? (p.mime === 'application/pdf' ? `<span class="pdf">PDF<br>${esc(p.name || '')}</span>` : `<img src="${esc(p.data)}" alt="Factura ${idx + 1}">`) : '<span class="ph-loading">Cargando…</span>'}
       <button type="button" class="icon del" data-action="del-photo" data-idx="${idx}" aria-label="Quitar foto">${ICON.trash}</button>
     </div>`).join('');
 }
@@ -661,9 +854,15 @@ async function loadDraftPhotos() {
 
 function bindRegister() {
   const form = document.getElementById('reg-form');
+  if (!form) return;
   const d = draft;
+  // En iPhone, la tecla «Buscar» del teclado no debe guardar el formulario
+  document.getElementById('task-filter').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }
+  });
   form.addEventListener('input', (e) => {
     const el = e.target;
+    if (el.id !== 'task-filter') markDirty(d);
     if (el.name === 'date') d.date = el.value;
     else if (el.name === 'engineHours') d.engineHours = el.value;
     else if (el.name === 'title') d.title = el.value;
@@ -679,6 +878,7 @@ function bindRegister() {
   });
   form.addEventListener('change', async (e) => {
     const el = e.target;
+    markDirty(d);
     if (el.dataset.pick) {
       if (el.checked) d.taskIds.add(el.dataset.pick); else d.taskIds.delete(el.dataset.pick);
       refreshPicked();
@@ -698,11 +898,12 @@ function bindRegister() {
         }
       }
       document.getElementById('draft-photos').innerHTML = draftPhotos();
+      storeDraft(d);
     }
   });
   form.addEventListener('submit', (e) => {
     e.preventDefault();
-    saveDraft();
+    guarded(form, saveDraft);
   });
   loadDraftPhotos();
 }
@@ -721,11 +922,17 @@ async function saveDraft() {
   const fail = (m) => { err.textContent = m; err.hidden = false; err.scrollIntoView({ block: 'center', behavior: 'smooth' }); };
   if (!d.date) return fail('Falta la fecha.');
   if (d.date > todayStr()) return fail('La fecha no puede ser futura.');
+  for (const id of [...d.taskIds]) if (!taskById(id)) d.taskIds.delete(id);
   if (!d.taskIds.size && !d.title.trim()) return fail('Marca al menos una tarea o escribe una descripción.');
   const hours = d.engineHours.trim() === '' ? null : parseNum(d.engineHours);
   if (hours !== null && !(hours >= 0)) return fail('Las horas de motor no son válidas. Escribe solo el número, por ejemplo 1180,5.');
   if (d.doneBy === 'taller' && d.invoiceTotal.trim() && !(parseNum(d.invoiceTotal) >= 0)) return fail('El total de la factura no es un importe válido.');
   if (d.doneBy === 'yo' && d.materials.some((m) => String(m.cost).trim() && !(parseNum(m.cost) >= 0))) return fail('Algún coste de material no es un importe válido.');
+  for (const id of d.taskIds) {
+    const t = taskById(id);
+    if (t && t.type === 'caducidad' && !isNum(t.intervalMonths) && !d.expiries[id]) return fail(`Anota la fecha de caducidad o próxima revisión de «${t.name}».`);
+  }
+  if (!confirmHours(hours, d.date)) return;
 
   // Fotos: guardar las nuevas, borrar las quitadas
   if (d.doneBy === 'taller') {
@@ -742,7 +949,7 @@ async function saveDraft() {
     id: d.id,
     date: d.date,
     engineHours: hours,
-    taskIds: [...d.taskIds],
+    taskIds: [...d.taskIds].filter((id) => taskById(id)),
     title: d.title.trim(),
     doneBy: d.doneBy,
     materials: d.doneBy === 'yo' ? d.materials.filter((m) => m.desc.trim() || num(m.cost)).map((m) => ({ desc: m.desc.trim(), cost: num(m.cost) })) : [],
@@ -757,6 +964,7 @@ async function saveDraft() {
   if (d.doneBy !== 'taller') for (const p of d.photos) if (p.existing) await repo.delPhoto(p.id);
 
   await repo.put('interventions', obj);
+  formSaved(d.key);
   draft = null;
   toast(d.isNew ? 'Intervención guardada' : 'Cambios guardados');
   go(d.isNew ? '#/' : `#/intervencion/${encodeURIComponent(obj.id)}`);
@@ -848,13 +1056,13 @@ function viewTaskEdit(id) {
       <label><input type="radio" name="type" value="caducidad" ${t.type === 'caducidad' ? 'checked' : ''}><span>Por fecha de caducidad</span></label>
     </fieldset>
     <div class="grid2">
-      <label>Cada (horas de motor)<input type="number" name="intervalHours" min="0" step="1" inputmode="numeric" value="${t.intervalHours ?? ''}" placeholder="—"></label>
-      <label>Cada (meses)<input type="number" name="intervalMonths" min="0" step="1" inputmode="numeric" value="${t.intervalMonths ?? ''}" placeholder="—"></label>
+      <label>Cada (horas de motor)<input type="number" name="intervalHours" min="0" step="1" inputmode="numeric" value="${esc(t.intervalHours ?? '')}" placeholder="—"></label>
+      <label>Cada (meses)<input type="number" name="intervalMonths" min="0" step="1" inputmode="numeric" value="${esc(t.intervalMonths ?? '')}" placeholder="—"></label>
     </div>
     <p class="hint">Si rellenas los dos, avisa con lo que llegue antes. En las tareas por caducidad, los meses solo se usan si no anotas la fecha.</p>
     <div class="grid2">
-      <label>Avisar con (horas)<input type="number" name="noticeHours" min="0" step="1" inputmode="numeric" value="${t.noticeHours ?? ''}" placeholder="${st.noticeHours} (por defecto)"></label>
-      <label>Avisar con (días)<input type="number" name="noticeDays" min="0" step="1" inputmode="numeric" value="${t.noticeDays ?? ''}" placeholder="${st.noticeDays} (por defecto)"></label>
+      <label>Avisar con (horas)<input type="number" name="noticeHours" min="0" step="1" inputmode="numeric" value="${esc(t.noticeHours ?? '')}" placeholder="${esc(st.noticeHours)} (por defecto)"></label>
+      <label>Avisar con (días)<input type="number" name="noticeDays" min="0" step="1" inputmode="numeric" value="${esc(t.noticeDays ?? '')}" placeholder="${esc(st.noticeDays)} (por defecto)"></label>
     </div>
     <label>Notas<textarea name="notes" rows="3">${esc(t.notes || '')}</textarea></label>
     <label class="check"><input type="checkbox" name="active" ${t.active ? 'checked' : ''}><span>Activa (genera avisos)</span></label>
@@ -868,8 +1076,17 @@ function viewTaskEdit(id) {
 
 function bindTaskForm() {
   const form = document.getElementById('task-form');
-  form.addEventListener('submit', async (e) => {
+  if (!form) return;
+  form.addEventListener('input', () => markDirty());
+  form.addEventListener('change', () => markDirty());
+  form.addEventListener('submit', (e) => {
     e.preventDefault();
+    guarded(form, () => saveTask(form));
+  });
+}
+
+async function saveTask(form) {
+  {
     const fd = new FormData(form);
     const name = String(fd.get('name') || '').trim();
     const err = document.getElementById('form-error');
@@ -895,16 +1112,22 @@ function bindTaskForm() {
       return;
     }
     await repo.put('tasks', obj);
+    formSaved();
     toast('Tarea guardada');
     go(`#/tarea/${encodeURIComponent(id)}`);
-  });
+  }
 }
 
 // ───────────────────────── Horas ─────────────────────────
 function viewHours() {
   const pts = [
     ...repo.state.readings.map((r) => ({ ...r, kind: 'lectura' })),
-    ...repo.state.interventions.filter((i) => isNum(i.engineHours)).map((i) => ({ id: i.id, date: i.date, hours: i.engineHours, kind: 'intervencion', title: interventionTitle(i) })),
+    ...repo.state.interventions.filter((i) => isNum(i.engineHours)).map((i) => ({ id: i.id, date: i.date, hours: i.engineHours, kind: 'intervencion', title: interventionTitle(i), href: `#/intervencion/${encodeURIComponent(i.id)}` })),
+    ...repo.state.trips.flatMap((t) => [
+      isNum(t.hoursStart) ? { id: t.id, date: t.date, hours: t.hoursStart, kind: 'otro', title: `Salida: ${tripRoute(t)}`, href: `#/navegacion/${encodeURIComponent(t.id)}` } : null,
+      isNum(t.hoursEnd) ? { id: t.id, date: t.endDate || t.date, hours: t.hoursEnd, kind: 'otro', title: `Llegada: ${tripRoute(t)}`, href: `#/navegacion/${encodeURIComponent(t.id)}` } : null,
+    ].filter(Boolean)),
+    ...repo.state.fuel.filter((f) => isNum(f.engineHours) && !f.tripId).map((f) => ({ id: f.id, date: f.date, hours: f.engineHours, kind: 'otro', title: 'Repostaje', href: `#/repostaje/${encodeURIComponent(f.id)}` })),
   ].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.hours - a.hours));
   const rate = usageRate(repo.state);
   return `
@@ -922,12 +1145,12 @@ function viewHours() {
       <span class="log-title">${fmtHours(p.hours)}</span>
       <span class="log-meta">${p.kind === 'lectura'
         ? `<span>Lectura</span><button class="icon" data-action="delete-reading" data-id="${esc(p.id)}" aria-label="Borrar lectura">${ICON.trash}</button>`
-        : `<a href="#/intervencion/${encodeURIComponent(p.id)}">${esc(p.title)}</a>`}</span>
+        : `<a href="${p.href}">${esc(p.title)}</a>`}</span>
     </li>`).join('')}</ul>` : '<p class="muted">Aún no hay lecturas.</p>'}`;
 }
 
 async function addReading(date, hours) {
-  await repo.put('readings', { id: uid(), date, hours: round1(hours) });
+  await repo.put('readings', { id: uid(), date, hours: round1(hours), createdAt: new Date().toISOString() });
   toast(`Anotadas ${fmtHours(hours)}`);
 }
 
@@ -957,6 +1180,7 @@ function viewSettings() {
   }
   return `
   <h1>Ajustes</h1>
+  <p><a class="btn" href="#/tareas">Tareas de mantenimiento e intervalos</a></p>
   <section>
     <h2>Avisos en el calendario</h2>
     <p>Descarga un archivo con las próximas fechas de mantenimiento (24 meses) y ábrelo para añadirlo al calendario. Cada evento lleva dos avisos: con la antelación de la tarea y el día antes.</p>
@@ -988,7 +1212,7 @@ function viewSettings() {
     <p>Un archivo con todas tus tareas, intervenciones, lecturas y facturas. Guárdalo en iCloud Drive o en tu ordenador.</p>
     <div class="actions">
       <button class="btn" data-action="export-json">Exportar copia</button>
-      <label class="btn file"><span>Importar copia</span><input type="file" id="import-input" accept="application/json,.json" hidden></label>
+      <label class="btn file"><span>Importar copia</span><input type="file" id="import-input" class="sr" accept="application/json,.json"></label>
     </div>
   </section>
 
@@ -1000,26 +1224,40 @@ function viewSettings() {
 }
 
 function bindSettings() {
-  document.getElementById('settings-form').addEventListener('submit', async (e) => {
+  const sf = document.getElementById('settings-form');
+  sf.addEventListener('input', () => markDirty());
+  sf.addEventListener('submit', (e) => {
     e.preventDefault();
-    const fd = new FormData(e.target);
+    guarded(sf, async () => {
+    const fd = new FormData(sf);
+    const nh = parseNum(fd.get('noticeHours'));
+    const nd = parseNum(fd.get('noticeDays'));
+    if (!(nh >= 0) || !(nd >= 0)) { toast('Los avisos deben ser números (horas y días).'); return; }
     await saveSettings({
       boatName: String(fd.get('boatName') || '').trim() || DEFAULT_SETTINGS.boatName,
       boatModel: String(fd.get('boatModel') || '').trim(),
       engine: String(fd.get('engine') || '').trim(),
-      noticeHours: num(fd.get('noticeHours')),
-      noticeDays: num(fd.get('noticeDays')),
+      noticeHours: Math.round(nh),
+      noticeDays: Math.round(nd),
     });
+    formSaved();
     toast('Ajustes guardados');
+    });
   });
   const login = document.getElementById('login-form');
   if (login) {
+    login.addEventListener('click', (e) => {
+      const b = e.target.closest('button[type=submit]');
+      if (b) login.dataset.op = b.value;
+    });
     login.addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (login.dataset.busy) return;
       const fd = new FormData(login);
-      const op = e.submitter?.value || 'in';
+      const op = e.submitter?.value || login.dataset.op || 'in';
       const errEl = document.getElementById('login-error');
       errEl.hidden = true;
+      login.dataset.busy = '1';
       try {
         const cred = op === 'up'
           ? await signUp(fd.get('email'), fd.get('password'))
@@ -1028,6 +1266,8 @@ function bindSettings() {
       } catch (err) {
         errEl.textContent = authError(err);
         errEl.hidden = false;
+      } finally {
+        delete login.dataset.busy;
       }
     });
   }
@@ -1051,21 +1291,55 @@ function authError(err) {
 
 async function switchToCloud(user) {
   const local = await readLocalDump();
-  const hasLocal = local.interventions.length || local.readings.length;
+  const hasLocal = local.interventions.length || local.readings.length || local.trips.length || local.fuel.length;
   localStorage.setItem('velero.mode', 'cloud');
   seededCloud = false;
-  const r = await repo.useCloud(user);
+  await repo.useCloud(user);
   if (hasLocal) {
-    const ok = confirm(`Este dispositivo tiene ${local.interventions.length} intervenciones y ${local.readings.length} lecturas guardadas sin cuenta. ¿Subirlas a tu cuenta?`);
+    const ok = confirm(`Este dispositivo tiene datos guardados sin cuenta (${local.interventions.length} intervenciones, ${local.trips.length} navegaciones, ${local.fuel.length} repostajes y ${local.readings.length} lecturas). ¿Subirlos a tu cuenta? Si algo ya está en la cuenta, se conserva la versión más reciente.`);
     if (ok) {
-      for (const c of COLLECTIONS) for (const obj of local[c]) await repo.put(c, obj);
-      for (const p of local.photos) await repo.putPhoto(p);
-      toast('Datos subidos a tu cuenta');
+      await waitServer(10000);
+      const res = await mergeData(local);
+      await clearLocalData(); // ya están en la cuenta: que no se vuelvan a ofrecer ni a mezclar
+      toast(`Datos subidos a tu cuenta (${res.written} registros)`);
     }
   }
-  if (r.fresh) { seededCloud = true; await ensureDefaults(); }
   updateSyncBadge();
   render(true);
+}
+
+// Espera a que la nube confirme los datos del servidor (o se agote el tiempo)
+function waitServer(ms) {
+  return new Promise((resolve) => {
+    if (repo.sync.serverConfirmed) return resolve(true);
+    const t = setTimeout(() => { off(); resolve(false); }, ms);
+    const off = repo.onChange((_, sync) => {
+      if (sync.serverConfirmed) { clearTimeout(t); off(); resolve(true); }
+    });
+  });
+}
+
+// Fusiona datos (copia o modo local) con los actuales: añade lo que falta y
+// sustituye solo lo que sea más reciente. Descarta registros no válidos.
+async function mergeData(data) {
+  let written = 0, skipped = 0;
+  for (const c of COLLECTIONS) {
+    const rows = Array.isArray(data[c]) ? data[c] : [];
+    for (const raw of rows) {
+      const rec = sanitizeRecord(c, raw);
+      if (!rec) { skipped++; continue; }
+      const cur = repo.state[c].find((x) => x.id === rec.id);
+      if (cur && (cur.updatedAt || '') >= (rec.updatedAt || '')) continue;
+      await repo.put(c, rec, { touch: false });
+      written++;
+    }
+  }
+  for (const raw of Array.isArray(data.photos) ? data.photos : []) {
+    const ph = sanitizeRecord('photos', raw);
+    if (!ph) { skipped++; continue; }
+    await repo.putPhoto(ph);
+  }
+  return { written, skipped };
 }
 
 // ───────────────────────── Exportaciones ─────────────────────────
@@ -1083,10 +1357,12 @@ async function exportICS() {
 
 async function exportJSON() {
   const photos = [];
+  let missing = 0;
   for (const i of repo.state.interventions) {
     for (const id of i.photoIds || []) {
       const p = await repo.getPhoto(id);
       if (p) photos.push(p);
+      else missing++;
     }
   }
   const data = {
@@ -1096,9 +1372,12 @@ async function exportJSON() {
     tasks: repo.state.tasks,
     interventions: repo.state.interventions,
     readings: repo.state.readings,
+    trips: repo.state.trips,
+    fuel: repo.state.fuel,
     meta: repo.state.meta,
     photos,
   };
+  if (missing) toast(`Atención: ${missing} ${missing === 1 ? 'factura no está' : 'facturas no están'} en este dispositivo y no van en la copia. Hazla con conexión.`);
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   await shareOrDownload(blob, `velero-copia-${todayStr()}.json`, 'Copia de seguridad del velero');
 }
@@ -1111,24 +1390,36 @@ async function importBackup(file) {
     toast('Ese archivo no es una copia válida.');
     return;
   }
-  if (data.app !== 'velero-mantenimiento') { toast('Ese archivo no es una copia de esta app.'); return; }
-  const n = (data.interventions || []).length;
-  if (!confirm(`La copia tiene ${n} intervenciones. Se añadirán a tus datos (las que ya existan se sustituirán por las de la copia). ¿Continuar?`)) return;
-  for (const c of COLLECTIONS) for (const obj of data[c] || []) await repo.put(c, obj);
-  for (const p of data.photos || []) await repo.putPhoto(p);
-  toast('Copia importada');
+  if (!data || typeof data !== 'object' || data.app !== 'velero-mantenimiento') { toast('Ese archivo no es una copia de esta app.'); return; }
+  const len = (k) => (Array.isArray(data[k]) ? data[k].length : 0);
+  if (!confirm(`La copia tiene ${len('interventions')} intervenciones, ${len('trips')} navegaciones y ${len('fuel')} repostajes. Se añadirá lo que falte y se actualizará lo que en la copia sea más reciente. ¿Continuar?`)) return;
+  toast('Importando…');
+  try {
+    const res = await mergeData(data);
+    toast(res.skipped
+      ? `Copia importada (${res.written} registros). ${res.skipped} no eran válidos y se han descartado.`
+      : `Copia importada (${res.written} registros).`);
+  } catch (e) {
+    console.error(e);
+    toast('La importación se ha detenido por un error: ' + e.message);
+  }
   go('#/');
+}
+
+function isIOS() {
+  return /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }
 
 async function shareOrDownload(blob, filename, title) {
   const file = new File([blob], filename, { type: blob.type });
-  const standaloneIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  if (standaloneIOS && navigator.canShare && navigator.canShare({ files: [file] })) {
+  if (isIOS() && navigator.canShare && navigator.canShare({ files: [file] })) {
     try {
       await navigator.share({ files: [file], title });
       return;
     } catch (e) {
       if (e.name === 'AbortError') return;
+      // El permiso del toque ha caducado mientras se preparaba el archivo: pedir otro toque
+      if (e.name === 'NotAllowedError') { offerShare(file, title); return; }
     }
   }
   const url = URL.createObjectURL(blob);
@@ -1141,16 +1432,33 @@ async function shareOrDownload(blob, filename, title) {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
+function offerShare(file, title) {
+  document.getElementById('sharebar')?.remove();
+  const bar = document.createElement('div');
+  bar.id = 'sharebar';
+  bar.className = 'sharebar';
+  bar.innerHTML = `<span>El archivo está listo.</span><button class="btn small primary" type="button">Compartir</button><button class="btn small" type="button">Cerrar</button>`;
+  const [share, close] = bar.querySelectorAll('button');
+  share.addEventListener('click', () => {
+    navigator.share({ files: [file], title }).catch(() => {}).finally(() => bar.remove());
+  });
+  close.addEventListener('click', () => bar.remove());
+  document.body.appendChild(bar);
+  share.focus();
+}
+
 // ───────────────────────── Eventos ─────────────────────────
 function bindView(key) {
   if (key === '') {
-    document.getElementById('hours-form').addEventListener('submit', async (e) => {
+    const hf = document.getElementById('hours-form');
+    hf.addEventListener('submit', (e) => {
       e.preventDefault();
-      const v = parseNum(e.target.hours.value);
-      if (!(v >= 0)) { toast('Escribe las horas con números, por ejemplo 1180,5'); return; }
-      const cur = currentHours(repo.state);
-      if (cur && v < cur.hours && !confirm(`El valor (${fmtHours(v)}) es menor que la última lectura (${fmtHours(cur.hours)}). ¿Guardarlo igualmente?`)) return;
-      await addReading(todayStr(), v);
+      guarded(hf, async () => {
+        const v = parseNum(hf.hours.value);
+        if (!(v >= 0)) { toast('Escribe las horas con números, por ejemplo 1180,5'); return; }
+        if (!confirmHours(round1(v), todayStr())) return;
+        await addReading(todayStr(), v);
+      });
     });
   } else if (key === 'registrar' || key === 'editar-intervencion') {
     bindRegister();
@@ -1158,15 +1466,25 @@ function bindView(key) {
     bindTaskForm();
   } else if (key === 'ajustes') {
     bindSettings();
+  } else if (key === 'navegar' || key === 'editar-navegacion') {
+    bindTripForm();
+  } else if (key === 'repostar' || key === 'editar-repostaje') {
+    bindFuelForm();
   } else if (key === 'intervencion') {
     loadThumbs();
   } else if (key === 'horas') {
-    document.getElementById('reading-form').addEventListener('submit', async (e) => {
+    const rf = document.getElementById('reading-form');
+    rf.addEventListener('submit', (e) => {
       e.preventDefault();
-      const v = parseNum(e.target.hours.value);
-      if (!(v >= 0)) { toast('Escribe las horas con números, por ejemplo 1180,5'); return; }
-      await addReading(e.target.date.value, v);
-      render(true);
+      guarded(rf, async () => {
+        const v = parseNum(rf.hours.value);
+        const date = rf.date.value;
+        if (!date || date > todayStr()) { toast('La fecha no es válida.'); return; }
+        if (!(v >= 0)) { toast('Escribe las horas con números, por ejemplo 1180,5'); return; }
+        if (!confirmHours(round1(v), date)) return;
+        await addReading(date, v);
+        render(true);
+      });
     });
   }
 }
@@ -1192,7 +1510,7 @@ async function onClick(e) {
     if (p?.existing) draft.removedPhotos.push(p.id);
     document.getElementById('draft-photos').innerHTML = draftPhotos();
   } else if (a === 'open-photo') {
-    const p = await repo.getPhoto(el.dataset.id);
+    const p = photoCache.get(el.dataset.id) || (await repo.getPhoto(el.dataset.id));
     if (p) openPhoto(p);
   } else if (a === 'delete-intervention') {
     if (!confirm('¿Borrar esta intervención? No se puede deshacer.')) return;
@@ -1213,6 +1531,24 @@ async function onClick(e) {
     await repo.del('tasks', id);
     toast('Tarea borrada');
     go('#/tareas');
+  } else if (a === 'delete-trip') {
+    const t = repo.state.trips.find((x) => x.id === el.dataset.id);
+    const msg = t?.fuelId ? '¿Borrar esta navegación y el repostaje apuntado en ella? No se puede deshacer.' : '¿Borrar esta navegación? No se puede deshacer.';
+    if (!confirm(msg)) return;
+    if (t?.fuelId) await repo.del('fuel', t.fuelId);
+    await repo.del('trips', el.dataset.id);
+    toast('Navegación borrada');
+    go('#/bitacora');
+  } else if (a === 'delete-fuel') {
+    if (!confirm('¿Borrar este repostaje? No se puede deshacer.')) return;
+    const f = repo.state.fuel.find((x) => x.id === el.dataset.id);
+    if (f?.tripId) {
+      const t = repo.state.trips.find((x) => x.id === f.tripId);
+      if (t) await repo.put('trips', { ...t, fuelId: null });
+    }
+    await repo.del('fuel', el.dataset.id);
+    toast('Repostaje borrado');
+    go('#/historial?tipo=combustible');
   } else if (a === 'delete-reading') {
     if (!confirm('¿Borrar esta lectura?')) return;
     await repo.del('readings', el.dataset.id);
@@ -1234,33 +1570,551 @@ async function onClick(e) {
     try { await resetPassword(email); toast('Te hemos enviado un correo para cambiarla.'); }
     catch (err) { toast(authError(err)); }
   } else if (a === 'check-update') {
+    if (!navigator.onLine) { toast('Sin conexión: no se puede buscar ahora.'); return; }
     const reg = await navigator.serviceWorker?.getRegistration();
-    if (reg) { await reg.update(); toast(reg.waiting ? 'Hay una versión nueva' : 'Tienes la última versión'); }
+    if (!reg) return;
+    try { await reg.update(); } catch { toast('No se ha podido comprobar. Inténtalo más tarde.'); return; }
+    toast(reg.installing || reg.waiting ? 'Hay una versión nueva: pulsa «Actualizar» arriba.' : 'Tienes la última versión.');
   } else if (a === 'apply-update') {
     const reg = await navigator.serviceWorker?.getRegistration();
     reg?.waiting?.postMessage('skipWaiting');
   } else if (a === 'close-viewer') {
-    document.getElementById('viewer').remove();
+    closeViewer();
+  } else if (a === 'skip') {
+    $view.focus();
   }
 }
 
+function closeViewer() {
+  document.getElementById('viewer')?.remove();
+}
+
+function pdfUrl(data) {
+  const bin = atob(data.split(',')[1]);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+}
+
 function openPhoto(p) {
-  if (p.mime === 'application/pdf') {
-    const bin = atob(p.data.split(',')[1]);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
-    window.open(url, '_blank');
-    return;
-  }
+  closeViewer();
   const v = document.createElement('div');
   v.id = 'viewer';
   v.className = 'viewer';
   v.setAttribute('role', 'dialog');
   v.setAttribute('aria-label', 'Factura');
-  v.innerHTML = `<button class="btn" data-action="close-viewer">Cerrar</button><img src="${p.data}" alt="Factura">`;
+  v.innerHTML = `<button class="btn" data-action="close-viewer">Cerrar</button><img src="${esc(p.data)}" alt="Factura">`;
   document.body.appendChild(v);
   v.querySelector('button').focus();
+}
+
+// ───────────────────────── Nuevo apunte ─────────────────────────
+function viewNew() {
+  return `
+  <h1>¿Qué quieres apuntar?</h1>
+  <ul class="choices">
+    <li><a href="#/navegar"><strong>Navegación</strong><span>Una salida al mar: puertos, horas de motor, millas y, si echaste, combustible.</span></a></li>
+    <li><a href="#/registrar"><strong>Mantenimiento</strong><span>Una tarea hecha por ti o por un taller, con material o factura.</span></a></li>
+    <li><a href="#/repostar"><strong>Repostaje</strong><span>Combustible en surtidor o con garrafas, aunque no salgas a navegar.</span></a></li>
+    <li><a href="#/horas"><strong>Horas de motor</strong><span>Solo la lectura del contador.</span></a></li>
+  </ul>`;
+}
+
+// ───────────────────────── Bitácora ─────────────────────────
+function byDateDesc(a, b) {
+  return a.date < b.date ? 1 : a.date > b.date ? -1 : (b.createdAt || '').localeCompare(a.createdAt || '');
+}
+
+function fmtNum(n, dec = 1) {
+  return new Intl.NumberFormat('es-ES', { maximumFractionDigits: dec }).format(n || 0);
+}
+
+function tripRoute(t) {
+  const from = (t.from || '').trim();
+  const to = (t.to || '').trim();
+  if (from && to && from.toLowerCase() !== to.toLowerCase()) return `${from} – ${to}`;
+  if (from || to) return from || to;
+  return 'Navegación';
+}
+
+function tripDateText(t, long) {
+  const opts = long ? { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' } : undefined;
+  if (t.endDate && t.endDate > t.date) return `Del ${fmtDate(t.date, opts)} al ${fmtDate(t.endDate, opts)}`;
+  return fmtDate(t.date, opts);
+}
+
+function tripRow(t) {
+  const eh = tripEngineHours(t);
+  const fuel = t.fuelId ? repo.state.fuel.find((f) => f.id === t.fuelId) : null;
+  const days = tripDays(t);
+  return `<li><a class="logrow" href="#/navegacion/${encodeURIComponent(t.id)}">
+    <time datetime="${esc(t.date)}">${fmtDate(t.date)}</time>
+    <span class="log-title">${esc(tripRoute(t))}</span>
+    <span class="log-meta">
+      ${days > 1 ? `<span>${days} días</span>` : ''}
+      ${num(t.miles) ? `<span>${fmtNum(num(t.miles))} mn</span>` : ''}
+      ${eh !== null ? `<span>${fmtHours(eh)} de motor</span>` : ''}
+      ${fuel ? `<span>${fmtNum(num(fuel.liters))} L repostados</span>` : ''}
+    </span>
+  </a></li>`;
+}
+
+function viewLogbook(r) {
+  const all = [...repo.state.trips].sort(byDateDesc);
+  if (!all.length) {
+    return `<h1>Bitácora</h1>
+    <section class="notice"><p>Apunta cada salida aunque no hagas mantenimiento: de dónde a dónde, las horas del motor al salir y al volver, las millas y lo que quieras recordar. Así el contador de horas se mantiene al día solo.</p>
+    <a class="btn primary" href="#/navegar">Registrar navegación</a></section>`;
+  }
+  const years = [...new Set(all.map((t) => t.date.slice(0, 4)))].sort().reverse();
+  let year = r.params.get('anio') || years[0];
+  if (year !== 'todo' && !years.includes(year)) year = years[0];
+  const list = year === 'todo' ? all : all.filter((t) => t.date.startsWith(year));
+  const st = tripStats(list);
+  return `
+  <div class="titlebar"><h1>Bitácora</h1><a class="btn small" href="#/navegar">Nueva navegación</a></div>
+  <nav class="chips" aria-label="Año">
+    ${years.map((y) => `<a href="#/bitacora?anio=${encodeURIComponent(y)}" ${y === year ? 'aria-current="true"' : ''}>${esc(y)}</a>`).join('')}
+    <a href="#/bitacora?anio=todo" ${year === 'todo' ? 'aria-current="true"' : ''}>Todos los años</a>
+  </nav>
+  <dl class="stats">
+    <div><dt>Salidas</dt><dd>${st.count}</dd></div>
+    <div><dt>Días de mar</dt><dd>${st.days}</dd></div>
+    <div><dt>Millas</dt><dd>${fmtNum(st.miles)}</dd></div>
+    <div><dt>Horas de motor</dt><dd>${fmtNum(st.engine)}</dd></div>
+  </dl>
+  <ul class="log">${list.map(tripRow).join('')}</ul>`;
+}
+
+function viewTrip(id) {
+  const t = repo.state.trips.find((x) => x.id === id);
+  if (!t) return notFound('Esta navegación ya no existe.');
+  const eh = tripEngineHours(t);
+  const fuel = t.fuelId ? repo.state.fuel.find((f) => f.id === t.fuelId) : null;
+  const facts = [];
+  if (t.from) facts.push(['Salida', t.from]);
+  if (t.to) facts.push(['Llegada', t.to]);
+  if (num(t.miles)) facts.push(['Millas', `${fmtNum(num(t.miles))} mn`]);
+  if (isNum(t.hoursStart) || isNum(t.hoursEnd)) {
+    facts.push(['Horas de motor', [isNum(t.hoursStart) ? `al salir ${fmtHours(t.hoursStart)}` : '', isNum(t.hoursEnd) ? `al volver ${fmtHours(t.hoursEnd)}` : ''].filter(Boolean).join(', ') + (eh !== null ? ` (${fmtHours(eh)} de uso)` : '')]);
+  }
+  if (t.crew) facts.push(['Tripulación', t.crew]);
+  if (t.conditions) facts.push(['Viento y mar', t.conditions]);
+  return `
+  ${backLink('#/bitacora', 'Bitácora')}
+  <article class="detail">
+    <p class="muted">${tripDateText(t, true)}</p>
+    <h1>${esc(tripRoute(t))}</h1>
+    ${facts.length ? `<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>` : ''}
+    ${t.notes ? `<h2>Notas</h2><p class="note pre">${esc(t.notes)}</p>` : ''}
+    ${fuel ? `<h2>Repostaje</h2><p><a href="#/repostaje/${encodeURIComponent(fuel.id)}">${esc(fuelSummary(fuel))}</a></p>` : ''}
+    <div class="actions">
+      <a class="btn primary" href="#/navegacion/${encodeURIComponent(t.id)}/editar">Editar</a>
+      <button class="btn danger" data-action="delete-trip" data-id="${esc(t.id)}">Borrar</button>
+    </div>
+  </article>`;
+}
+
+function knownPlaces() {
+  const set = new Set();
+  for (const t of repo.state.trips) { if (t.from) set.add(t.from.trim()); if (t.to) set.add(t.to.trim()); }
+  for (const f of repo.state.fuel) if (f.place) set.add(f.place.trim());
+  return [...set].filter(Boolean).sort((a, b) => a.localeCompare(b, 'es'));
+}
+
+function placesDatalist() {
+  return `<datalist id="places">${knownPlaces().map((p) => `<option value="${esc(p)}">`).join('')}</datalist>`;
+}
+
+function newTripDraft(existing) {
+  const fuel = existing?.fuelId ? repo.state.fuel.find((f) => f.id === existing.fuelId) : null;
+  if (existing) {
+    return {
+      id: existing.id, isNew: false, createdAt: existing.createdAt,
+      date: existing.date, endDate: existing.endDate || '',
+      from: existing.from || '', to: existing.to || '',
+      hoursStart: isNum(existing.hoursStart) ? fmtInput(existing.hoursStart) : '',
+      hoursEnd: isNum(existing.hoursEnd) ? fmtInput(existing.hoursEnd) : '',
+      miles: isNum(existing.miles) ? fmtInput(existing.miles) : '',
+      crew: existing.crew || '', conditions: existing.conditions || '', notes: existing.notes || '',
+      refuel: !!fuel,
+      fuelId: fuel?.id || null,
+      newFuelId: uid(),
+      fuel: fuelFields(fuel),
+    };
+  }
+  const cur = currentHours(repo.state);
+  const last = [...repo.state.trips].sort(byDateDesc)[0];
+  const home = last ? (last.to || last.from || '') : '';
+  return {
+    id: uid(), isNew: true, date: todayStr(), endDate: '',
+    from: home, to: '',
+    hoursStart: cur ? fmtInput(cur.hours) : '', hoursEnd: '', miles: '',
+    crew: '', conditions: '', notes: '',
+    refuel: false, fuelId: null, newFuelId: uid(), fuel: fuelFields(null),
+  };
+}
+
+function fuelFields(f) {
+  return {
+    liters: f && num(f.liters) ? fmtInput(f.liters) : '',
+    total: f && num(f.total) ? fmtInput(f.total) : '',
+    place: f?.place || '',
+    method: f?.method || 'surtidor',
+    fullTank: f ? !!f.fullTank : true,
+  };
+}
+
+function fmtInput(n) {
+  return String(Math.round(n * 100) / 100).replace('.', ',');
+}
+
+function viewTripForm(r, editId) {
+  let existing = null;
+  if (editId) {
+    existing = repo.state.trips.find((x) => x.id === editId);
+    if (!existing) return notFound('Esta navegación ya no existe.');
+  }
+  const key = location.hash;
+  if (!tripDraft || tripDraft.key !== key) {
+    tripDraft = loadStoredDraft(key) || newTripDraft(existing);
+    tripDraft.key = key;
+  }
+  const d = tripDraft;
+  const back = editId ? `#/navegacion/${encodeURIComponent(editId)}` : '#/bitacora';
+  return `
+  ${backLink(back, 'Cancelar')}
+  <h1>${editId ? 'Editar navegación' : 'Registrar navegación'}</h1>
+  <form id="trip-form" class="form" novalidate>
+    ${placesDatalist()}
+    <div class="grid2">
+      <label>Fecha de salida<input type="date" name="date" value="${esc(d.date)}" max="${todayStr()}" required></label>
+      <label>Fecha de llegada <span class="muted">(si fueron varios días)</span><input type="date" name="endDate" value="${esc(d.endDate)}" max="${todayStr()}"></label>
+    </div>
+    <div class="grid2">
+      <label>Salida<input type="text" name="from" list="places" value="${esc(d.from)}" placeholder="Puerto o fondeo" autocomplete="off"></label>
+      <label>Llegada<input type="text" name="to" list="places" value="${esc(d.to)}" placeholder="Igual que la salida si vuelves" autocomplete="off"></label>
+    </div>
+    <div class="grid2">
+      <label>Horas de motor al salir<input type="text" name="hoursStart" inputmode="decimal" value="${esc(d.hoursStart)}" placeholder="Contador"></label>
+      <label>Horas de motor al volver<input type="text" name="hoursEnd" inputmode="decimal" value="${esc(d.hoursEnd)}" placeholder="Contador"></label>
+    </div>
+    <p class="hint" id="trip-engine">${tripEngineHint()}</p>
+    <label>Millas <span class="muted">(opcional)</span><input type="text" name="miles" inputmode="decimal" value="${esc(d.miles)}"></label>
+    <label>Tripulación<input type="text" name="crew" value="${esc(d.crew)}" placeholder="Quién vino"></label>
+    <label>Viento y mar<input type="text" name="conditions" value="${esc(d.conditions)}" placeholder="Por ejemplo: SE 12–15 nudos, marejadilla"></label>
+    <label>Notas<textarea name="notes" rows="4" placeholder="Rumbo, fondeos, incidencias, cosas a revisar…">${esc(d.notes)}</textarea></label>
+
+    <label class="check"><input type="checkbox" name="refuel" ${d.refuel ? 'checked' : ''}><span>Repostaje en esta salida</span></label>
+    <div id="trip-fuel" ${d.refuel ? '' : 'hidden'}>${fuelFieldset(d.fuel, true)}</div>
+
+    <p class="form-error" id="form-error" role="alert" hidden></p>
+    <div class="actions sticky">
+      <button class="btn primary" type="submit">${editId ? 'Guardar cambios' : 'Guardar navegación'}</button>
+    </div>
+  </form>`;
+}
+
+function tripEngineHint() {
+  const d = tripDraft;
+  const a = d.hoursStart.trim() ? parseNum(d.hoursStart) : NaN;
+  const b = d.hoursEnd.trim() ? parseNum(d.hoursEnd) : NaN;
+  if (Number.isFinite(a) && Number.isFinite(b)) {
+    if (b < a) return 'Las horas al volver son menores que al salir: revísalas.';
+    return `Motor en esta salida: ${fmtHours(round1(b - a))}.`;
+  }
+  return 'Apunta lo que marque el contador; con eso se actualizan las horas del motor.';
+}
+
+function fuelFieldset(f, inTrip) {
+  const liters = parseNum(f.liters);
+  const total = parseNum(f.total);
+  const ppl = liters > 0 && total > 0 ? `${fmtMoney(total / liters)} el litro` : '';
+  return `<fieldset>
+    <legend>Combustible</legend>
+    <div class="grid2">
+      <label>Litros<input type="text" data-fuel="liters" inputmode="decimal" value="${esc(f.liters)}"></label>
+      <label>Importe total (€)<input type="text" data-fuel="total" inputmode="decimal" value="${esc(f.total)}"></label>
+    </div>
+    <p class="hint" data-ppl>${ppl}</p>
+    <label>Lugar<input type="text" data-fuel="place" list="places" value="${esc(f.place)}" placeholder="Gasolinera del puerto, estación de servicio…" autocomplete="off"></label>
+    <fieldset class="seg" role="radiogroup">
+      <legend>Cómo</legend>
+      <label><input type="radio" name="${inTrip ? 'trip-' : ''}method" data-fuel="method" value="surtidor" ${f.method !== 'garrafas' ? 'checked' : ''}><span>Surtidor del puerto</span></label>
+      <label><input type="radio" name="${inTrip ? 'trip-' : ''}method" data-fuel="method" value="garrafas" ${f.method === 'garrafas' ? 'checked' : ''}><span>Garrafas</span></label>
+    </fieldset>
+    <label class="check"><input type="checkbox" data-fuel="fullTank" ${f.fullTank ? 'checked' : ''}><span>Depósito lleno <span class="muted">(sirve para calcular el consumo)</span></span></label>
+  </fieldset>`;
+}
+
+function bindFuelInputs(container, f) {
+  container.addEventListener('input', (e) => {
+    const el = e.target;
+    const k = el.dataset.fuel;
+    if (!k) return;
+    if (k === 'fullTank') f.fullTank = el.checked;
+    else f[k] = el.value;
+    if (k === 'liters' || k === 'total') {
+      const l = parseNum(f.liters), t = parseNum(f.total);
+      container.querySelector('[data-ppl]').textContent = l > 0 && t > 0 ? `${fmtMoney(t / l)} el litro` : '';
+    }
+  });
+  container.addEventListener('change', (e) => {
+    const el = e.target;
+    if (el.dataset.fuel === 'fullTank') f.fullTank = el.checked;
+    if (el.dataset.fuel === 'method') f.method = el.value;
+  });
+}
+
+// Valida los campos de combustible. Devuelve el mensaje de error o null.
+function fuelError(f) {
+  const l = f.liters.trim() ? parseNum(f.liters) : null;
+  const t = f.total.trim() ? parseNum(f.total) : null;
+  if (l !== null && !(l >= 0)) return 'Los litros no son un número válido.';
+  if (t !== null && !(t >= 0)) return 'El importe del combustible no es válido.';
+  if (!(l > 0) && !(t > 0)) return 'Indica al menos los litros o el importe del combustible.';
+  if (l > 2000) return 'Los litros parecen demasiados: revísalos.';
+  return null;
+}
+
+function bindTripForm() {
+  const form = document.getElementById('trip-form');
+  if (!form) return;
+  const d = tripDraft;
+  form.addEventListener('input', (e) => {
+    const el = e.target;
+    markDirty(d);
+    if (el.dataset.fuel) return;
+    if (el.name in d && typeof d[el.name] === 'string') d[el.name] = el.value;
+    if (el.name === 'hoursStart' || el.name === 'hoursEnd') document.getElementById('trip-engine').textContent = tripEngineHint();
+  });
+  form.addEventListener('change', (e) => {
+    markDirty(d);
+    if (e.target.name === 'refuel') {
+      d.refuel = e.target.checked;
+      document.getElementById('trip-fuel').hidden = !d.refuel;
+    }
+  });
+  bindFuelInputs(document.getElementById('trip-fuel'), d.fuel);
+  form.addEventListener('submit', (e) => { e.preventDefault(); guarded(form, saveTrip); });
+}
+
+async function saveTrip() {
+  const d = tripDraft;
+  const err = document.getElementById('form-error');
+  const fail = (m) => { err.textContent = m; err.hidden = false; err.scrollIntoView({ block: 'center', behavior: 'smooth' }); };
+  const today = todayStr();
+  if (!d.date) return fail('Falta la fecha de salida.');
+  if (d.date > today) return fail('La fecha de salida no puede ser futura.');
+  if (d.endDate && d.endDate < d.date) return fail('La llegada no puede ser anterior a la salida.');
+  if (d.endDate && d.endDate > today) return fail('La fecha de llegada no puede ser futura.');
+  const hs = d.hoursStart.trim() ? parseNum(d.hoursStart) : null;
+  const he = d.hoursEnd.trim() ? parseNum(d.hoursEnd) : null;
+  if (hs !== null && !(hs >= 0)) return fail('Las horas al salir no son un número válido.');
+  if (he !== null && !(he >= 0)) return fail('Las horas al volver no son un número válido.');
+  if (hs !== null && he !== null && he < hs) return fail('Las horas al volver no pueden ser menores que al salir.');
+  if (hs !== null && he !== null && he - hs > 24 * Math.max(1, (d.endDate ? daysBetween(d.date, d.endDate) + 1 : 1)))
+    return fail('Hay más horas de motor que horas tiene la travesía: revisa el contador.');
+  const miles = d.miles.trim() ? parseNum(d.miles) : null;
+  if (miles !== null && !(miles >= 0)) return fail('Las millas no son un número válido.');
+  if (d.refuel) {
+    const fe = fuelError(d.fuel);
+    if (fe) return fail(fe);
+  }
+  if (!confirmHours(hs, d.date)) return;
+  if (!confirmHours(he, d.endDate || d.date)) return;
+
+  const trip = {
+    id: d.id,
+    date: d.date,
+    endDate: d.endDate && d.endDate > d.date ? d.endDate : '',
+    from: d.from.trim(),
+    to: d.to.trim(),
+    hoursStart: hs !== null ? round1(hs) : null,
+    hoursEnd: he !== null ? round1(he) : null,
+    miles: miles !== null ? round1(miles) : null,
+    crew: d.crew.trim(),
+    conditions: d.conditions.trim(),
+    notes: d.notes.trim(),
+    fuelId: null,
+    createdAt: d.createdAt || new Date().toISOString(),
+  };
+  if (d.refuel) {
+    const fuelId = d.fuelId || d.newFuelId || uid();
+    const old = repo.state.fuel.find((f) => f.id === fuelId);
+    await repo.put('fuel', {
+      ...(old || {}),
+      id: fuelId,
+      date: old?.date && old.date >= trip.date && old.date <= (trip.endDate || trip.date) ? old.date : (trip.endDate || trip.date),
+      liters: round2(num(d.fuel.liters)),
+      total: round2(num(d.fuel.total)),
+      place: d.fuel.place.trim(),
+      method: d.fuel.method,
+      fullTank: !!d.fuel.fullTank,
+      engineHours: trip.hoursEnd ?? trip.hoursStart,
+      tripId: trip.id,
+      notes: old?.notes || '',
+      createdAt: old?.createdAt || new Date().toISOString(),
+    });
+    trip.fuelId = fuelId;
+  } else if (d.fuelId) {
+    await repo.del('fuel', d.fuelId);
+  }
+  await repo.put('trips', trip);
+  formSaved(d.key);
+  tripDraft = null;
+  toast(d.isNew ? 'Navegación guardada' : 'Cambios guardados');
+  go(d.isNew ? '#/bitacora' : `#/navegacion/${encodeURIComponent(trip.id)}`);
+}
+
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+// ───────────────────────── Repostajes ─────────────────────────
+function fuelSummary(f) {
+  const parts = [];
+  if (num(f.liters)) parts.push(`${fmtNum(num(f.liters))} L`);
+  if (num(f.total)) parts.push(fmtMoney(num(f.total)));
+  if (f.place) parts.push(f.place);
+  return parts.join(', ') || 'Repostaje';
+}
+
+function fuelRow(f) {
+  const l = num(f.liters), t = num(f.total);
+  return `<li><a class="logrow" href="#/repostaje/${encodeURIComponent(f.id)}">
+    <time datetime="${esc(f.date)}">${fmtDate(f.date)}</time>
+    <span class="log-title">Combustible${l ? `: ${fmtNum(l)} L` : ''}</span>
+    <span class="log-meta">
+      <span>${f.method === 'garrafas' ? 'Garrafas' : 'Surtidor'}</span>
+      ${f.place ? `<span>${esc(f.place)}</span>` : ''}
+      ${t ? `<span class="money">${fmtMoney(t)}</span>` : ''}
+    </span>
+  </a></li>`;
+}
+
+function viewFuel(id) {
+  const f = repo.state.fuel.find((x) => x.id === id);
+  if (!f) return notFound('Este repostaje ya no existe.');
+  const trip = f.tripId ? repo.state.trips.find((t) => t.id === f.tripId) : null;
+  const l = num(f.liters), t = num(f.total);
+  return `
+  ${backLink('#/historial?tipo=combustible', 'Historial')}
+  <article class="detail">
+    <p class="muted">${fmtDate(f.date, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
+    <h1>Combustible${l ? `: ${fmtNum(l)} L` : ''}</h1>
+    <dl class="facts">
+      <dt>Importe</dt><dd>${t ? fmtMoney(t) : 'No anotado'}</dd>
+      ${l && t ? `<dt>Precio</dt><dd>${fmtMoney(t / l)} el litro</dd>` : ''}
+      <dt>Cómo</dt><dd>${f.method === 'garrafas' ? 'Con garrafas' : 'Surtidor del puerto'}${f.fullTank ? ', depósito lleno' : ''}</dd>
+      ${f.place ? `<dt>Lugar</dt><dd>${esc(f.place)}</dd>` : ''}
+      ${isNum(f.engineHours) ? `<dt>Horas de motor</dt><dd>${fmtHours(f.engineHours)}</dd>` : ''}
+      ${trip ? `<dt>Navegación</dt><dd><a href="#/navegacion/${encodeURIComponent(trip.id)}">${fmtDate(trip.date)}, ${esc(tripRoute(trip))}</a></dd>` : ''}
+    </dl>
+    ${f.notes ? `<h2>Notas</h2><p class="note pre">${esc(f.notes)}</p>` : ''}
+    <div class="actions">
+      <a class="btn primary" href="#/repostaje/${encodeURIComponent(f.id)}/editar">Editar</a>
+      <button class="btn danger" data-action="delete-fuel" data-id="${esc(f.id)}">Borrar</button>
+    </div>
+  </article>`;
+}
+
+function viewFuelForm(r, editId) {
+  let existing = null;
+  if (editId) {
+    existing = repo.state.fuel.find((x) => x.id === editId);
+    if (!existing) return notFound('Este repostaje ya no existe.');
+  }
+  const key = location.hash;
+  if (!tripDraft || tripDraft.key !== key) tripDraft = loadStoredDraft(key);
+  if (!tripDraft || tripDraft.key !== key) {
+    const cur = currentHours(repo.state);
+    tripDraft = {
+      key,
+      kind: 'fuel',
+      id: existing?.id || uid(),
+      isNew: !existing,
+      createdAt: existing?.createdAt,
+      tripId: existing?.tripId || null,
+      date: existing?.date || todayStr(),
+      engineHours: existing ? (isNum(existing.engineHours) ? fmtInput(existing.engineHours) : '') : '',
+      hoursHint: cur ? cur.hours : null,
+      notes: existing?.notes || '',
+      fuel: fuelFields(existing),
+    };
+    if (!existing) tripDraft.fuel.method = 'garrafas';
+  }
+  const d = tripDraft;
+  const back = editId ? `#/repostaje/${encodeURIComponent(editId)}` : '#/historial?tipo=combustible';
+  const trip = d.tripId ? repo.state.trips.find((t) => t.id === d.tripId) : null;
+  return `
+  ${backLink(back, 'Cancelar')}
+  <h1>${editId ? 'Editar repostaje' : 'Registrar repostaje'}</h1>
+  ${trip ? `<p class="hint">Apuntado en la navegación del ${fmtDate(trip.date)} (${esc(tripRoute(trip))}).</p>` : ''}
+  <form id="fuel-form" class="form" novalidate>
+    ${placesDatalist()}
+    <div class="grid2">
+      <label>Fecha<input type="date" name="date" value="${esc(d.date)}" max="${todayStr()}" required></label>
+      <label>Horas de motor <span class="muted">(opcional)</span><input type="text" name="engineHours" inputmode="decimal" value="${esc(d.engineHours)}"
+        placeholder="${d.hoursHint != null ? 'Última: ' + esc(d.hoursHint.toLocaleString('es-ES')) : ''}"></label>
+    </div>
+    <div id="fuel-fields">${fuelFieldset(d.fuel, false)}</div>
+    <label>Notas<textarea name="notes" rows="2">${esc(d.notes)}</textarea></label>
+    <p class="form-error" id="form-error" role="alert" hidden></p>
+    <div class="actions sticky"><button class="btn primary" type="submit">${editId ? 'Guardar cambios' : 'Guardar repostaje'}</button></div>
+  </form>`;
+}
+
+function bindFuelForm() {
+  const form = document.getElementById('fuel-form');
+  if (!form) return;
+  const d = tripDraft;
+  form.addEventListener('input', (e) => {
+    const el = e.target;
+    markDirty(d);
+    if (el.dataset.fuel) return;
+    if (el.name === 'date' || el.name === 'engineHours' || el.name === 'notes') d[el.name] = el.value;
+  });
+  bindFuelInputs(document.getElementById('fuel-fields'), d.fuel);
+  form.addEventListener('change', () => markDirty(d));
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    guarded(form, () => saveFuel(d));
+  });
+}
+
+async function saveFuel(d) {
+  {
+    const err = document.getElementById('form-error');
+    const fail = (m) => { err.textContent = m; err.hidden = false; err.scrollIntoView({ block: 'center', behavior: 'smooth' }); };
+    if (!d.date) return fail('Falta la fecha.');
+    if (d.date > todayStr()) return fail('La fecha no puede ser futura.');
+    const fe = fuelError(d.fuel);
+    if (fe) return fail(fe);
+    const h = d.engineHours.trim() ? parseNum(d.engineHours) : null;
+    if (h !== null && !(h >= 0)) return fail('Las horas de motor no son un número válido.');
+    if (!confirmHours(h, d.date)) return;
+    const old = repo.state.fuel.find((f) => f.id === d.id);
+    const obj = {
+      ...(old || {}),
+      id: d.id,
+      date: d.date,
+      liters: round2(num(d.fuel.liters)),
+      total: round2(num(d.fuel.total)),
+      place: d.fuel.place.trim(),
+      method: d.fuel.method,
+      fullTank: !!d.fuel.fullTank,
+      engineHours: h !== null ? round1(h) : null,
+      tripId: d.tripId,
+      notes: d.notes.trim(),
+      createdAt: d.createdAt || new Date().toISOString(),
+    };
+    await repo.put('fuel', obj);
+    formSaved(d.key);
+    tripDraft = null;
+    toast(d.isNew ? 'Repostaje guardado' : 'Cambios guardados');
+    go(d.isNew ? '#/historial?tipo=combustible' : `#/repostaje/${encodeURIComponent(obj.id)}`);
+  }
 }
 
 // ───────────────────────── Service worker ─────────────────────────

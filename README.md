@@ -1,6 +1,6 @@
 # Mantenimiento del velero
 
-App para llevar el mantenimiento de un Jeanneau Sun Odyssey 36i (2007) con motor Yanmar 3YM30. Registra intervenciones (fecha, horas de motor, notas, coste, facturas) y avisa cuando toca la siguiente, por horas o por fecha.
+Cuaderno de bitácora y de mantenimiento para un Jeanneau Sun Odyssey 36i (2007) con motor Yanmar 3YM30. Registra navegaciones, repostajes e intervenciones (fecha, horas de motor, notas, coste, facturas) y avisa cuando toca el siguiente mantenimiento, por horas o por fecha.
 
 - Funciona **sin cobertura**: se instala en la pantalla de inicio y guarda los datos en el dispositivo.
 - **Sincroniza** iPhone, iPad y ordenador cuando hay conexión (con Firebase, ver más abajo).
@@ -41,10 +41,12 @@ Los valores de `firebaseConfig` no son secretos: lo que protege tus datos es el 
 
 ## 4. Uso
 
-- **Estado**: contador de horas de motor y tareas vencidas o próximas. Apunta las horas cada vez que bajes del barco: con dos o más lecturas la app estima en qué fecha tocará cada tarea por horas.
+- **Estado**: contador de horas de motor y tareas vencidas o próximas. Con dos o más lecturas la app estima en qué fecha tocará cada tarea por horas.
+- **Bitácora**: cada salida (fechas, puertos, horas de motor al salir y al volver, millas, tripulación, viento y mar, notas y, si echaste, combustible). Las horas que apuntas aquí actualizan el contador.
+- **Repostaje**: combustible en surtidor o con garrafas, aunque no muevas el barco. Cuenta como gasto y, marcando «depósito lleno», calcula el consumo medio del motor (L/h).
 - **Registrar**: fecha, horas, tareas hechas, quién lo hizo. Si lo haces tú, anotas el material; si es un taller, el total y la foto o PDF de la factura. En tareas de caducidad (balsa, bengalas, extintores, ITB…) anota la fecha de la etiqueta.
-- **Historial**: intervenciones y gasto por año y por sistema.
-- **Tareas**: cambia intervalos y avisos, desactiva lo que no lleves o crea tareas nuevas.
+- **Historial**: mantenimiento y combustible, con el gasto por año, por sistema y de combustible.
+- **Tareas** (desde Estado o Ajustes): cambia intervalos y avisos, desactiva lo que no lleves o crea tareas nuevas.
 - **Ajustes**: exportar al calendario, sincronización, copia de seguridad.
 
 ## 5. Para mantener el proyecto

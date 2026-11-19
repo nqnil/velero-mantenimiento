@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Mantenimiento del velero</title>
-  <meta name="description" content="Registro de mantenimiento y avisos para un Jeanneau Sun Odyssey 36i.">
+  <meta name="description" content="Cuaderno de bitácora, mantenimiento y avisos para un Jeanneau Sun Odyssey 36i.">
   <meta name="theme-color" content="#E8EEED" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0E1A24" media="(prefers-color-scheme: dark)">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -18,9 +18,9 @@
   <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
-  <a class="skip" href="#view">Ir al contenido</a>
+  <button class="skip" type="button" data-action="skip">Ir al contenido</button>
   <header class="top">
-    <span class="brand">Mantenimiento</span>
+    <span class="brand">Cuaderno del velero</span>
     <p id="sync" class="sync" role="status" aria-live="polite"></p>
   </header>
   <div id="update" class="update" hidden>
@@ -34,15 +34,15 @@
     <a href="#/" data-nav="home">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v14M12 4l7 12H12M12 6 6 15h6M4 19h16l-2 2H6z"/></svg>
       <span>Estado</span></a>
+    <a href="#/bitacora" data-nav="trips">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5 13.4 13.4 8.5 15.5 10.6 10.6z"/></svg>
+      <span>Bitácora</span></a>
+    <a href="#/nuevo" data-nav="add" class="add">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      <span>Apuntar</span></a>
     <a href="#/historial" data-nav="log">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h10l3 3v15H6zM9 9h7M9 13h7M9 17h4"/></svg>
       <span>Historial</span></a>
-    <a href="#/registrar" data-nav="add" class="add">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-      <span>Registrar</span></a>
-    <a href="#/tareas" data-nav="tasks">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h2M4 12h2M4 18h2M9 6h11M9 12h11M9 18h11"/></svg>
-      <span>Tareas</span></a>
     <a href="#/ajustes" data-nav="gear">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg>
       <span>Ajustes</span></a>

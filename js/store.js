@@ -6,10 +6,11 @@
 // La app trabaja siempre contra `state` en memoria; el backend lo mantiene al día.
 
 import { FIREBASE_CONFIG } from './config.js';
+import { sanitizeRecord } from './logic.js';
 
-export const COLLECTIONS = ['tasks', 'interventions', 'readings', 'meta'];
+export const COLLECTIONS = ['tasks', 'interventions', 'readings', 'trips', 'fuel', 'meta'];
 const DB_NAME = 'velero-mantenimiento';
-const DB_VERSION = 1;
+const DB_VERSION = 2; // v2: trips y fuel
 
 // ───────────────────────── IndexedDB (modo local) ─────────────────────────
 function openIDB() {
@@ -21,9 +22,30 @@ function openIDB() {
         if (!db.objectStoreNames.contains(c)) db.createObjectStore(c, { keyPath: 'id' });
       }
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      // Si otra pestaña abre una versión nueva de la base de datos, cerramos y recargamos
+      db.onversionchange = () => { db.close(); location.reload(); };
+      resolve(db);
+    };
     req.onerror = () => reject(req.error);
+    req.onblocked = () => {
+      reject(new Error('La app está abierta en otra pestaña o ventana con una versión anterior. Ciérrala y vuelve a abrir esta.'));
+    };
   });
+}
+
+// Avisa a las otras pestañas abiertas de que los datos locales han cambiado
+const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('velero-mantenimiento') : null;
+
+function cleanRows(col, rows) {
+  const out = [];
+  for (const r of rows) {
+    const c = sanitizeRecord(col, r);
+    if (c) out.push(col === 'meta' ? c : { ...r, ...c });
+    else console.warn('Registro descartado por no ser válido', col, r);
+  }
+  return out;
 }
 
 function idbReq(req) {
@@ -40,20 +62,33 @@ class LocalBackend {
   async start(onData) {
     this.db = await openIDB();
     this.onData = onData;
-    for (const c of COLLECTIONS) {
+    await this.reload();
+    this.onMessage = (e) => { if (e.data && COLLECTIONS.includes(e.data.col)) this.reload(e.data.col); };
+    channel?.addEventListener('message', this.onMessage);
+    return { fresh: true };
+  }
+  async reload(only) {
+    for (const c of only ? [only] : COLLECTIONS) {
       const tx = this.db.transaction(c, 'readonly');
       const rows = await idbReq(tx.objectStore(c).getAll());
-      onData(c, rows);
+      this.onData(c, cleanRows(c, rows));
     }
-    return { fresh: true };
   }
   async put(col, obj) {
     const tx = this.db.transaction(col, 'readwrite');
     await idbReq(tx.objectStore(col).put(obj));
+    if (col !== 'photos') channel?.postMessage({ col });
   }
   async del(col, id) {
     const tx = this.db.transaction(col, 'readwrite');
     await idbReq(tx.objectStore(col).delete(id));
+    if (col !== 'photos') channel?.postMessage({ col });
+  }
+  async clearAll() {
+    for (const c of [...COLLECTIONS, 'photos']) {
+      const tx = this.db.transaction(c, 'readwrite');
+      await idbReq(tx.objectStore(c).clear());
+    }
   }
   async putPhoto(photo) {
     return this.put('photos', photo);
@@ -73,7 +108,9 @@ class LocalBackend {
     }
     return out;
   }
-  stop() {}
+  stop() {
+    if (this.onMessage) channel?.removeEventListener('message', this.onMessage);
+  }
 }
 
 // ───────────────────────── Firestore (modo nube) ─────────────────────────
@@ -95,7 +132,8 @@ export async function loadFirebase() {
     persistence: [fb.indexedDBLocalPersistence, fb.browserLocalPersistence],
   });
   fbDb = fb.initializeFirestore(fbApp, {
-    localCache: fb.persistentLocalCache({ tabManager: fb.persistentMultipleTabManager() }),
+    // 300 MB de caché: que las facturas sigan disponibles sin conexión
+    localCache: fb.persistentLocalCache({ tabManager: fb.persistentMultipleTabManager(), cacheSizeBytes: 300 * 1024 * 1024 }),
   });
   return fb;
 }
@@ -157,10 +195,7 @@ class CloudBackend {
           f.collection(fbDb, this.path(c)),
           { includeMetadataChanges: true },
           (snap) => {
-            onData(
-              c,
-              snap.docs.map((d) => d.data())
-            );
+            onData(c, cleanRows(c, snap.docs.map((d) => d.data())));
             if (snap.metadata.hasPendingWrites) this.pending.add(c);
             else this.pending.delete(c);
             if (!snap.metadata.fromCache) serverConfirmed.add(c);
@@ -230,7 +265,7 @@ function clean(obj) {
 // ───────────────────────── Repositorio ─────────────────────────
 export class Repo {
   constructor() {
-    this.state = { tasks: [], interventions: [], readings: [], meta: [] };
+    this.state = { tasks: [], interventions: [], readings: [], trips: [], fuel: [], meta: [] };
     this.listeners = new Set();
     this.backend = null;
     this.sync = { mode: 'local', pending: false, online: navigator.onLine };
@@ -247,9 +282,12 @@ export class Repo {
     this.backend = new LocalBackend();
     this.sync.mode = 'local';
     this.sync.pending = false;
+    let started = false;
     const r = await this.backend.start((c, rows) => {
       this.state[c] = rows;
+      if (started) this.emit(); // cambios hechos en otra pestaña
     });
+    started = true;
     this.emit();
     return r;
   }
@@ -272,8 +310,9 @@ export class Repo {
     return r;
   }
   // Escritura optimista: actualiza el estado en memoria y persiste.
-  async put(col, obj) {
-    obj.updatedAt = new Date().toISOString();
+  // touch=false conserva la fecha de modificación (al importar o fusionar datos)
+  async put(col, obj, { touch = true } = {}) {
+    if (touch || !obj.updatedAt) obj.updatedAt = new Date().toISOString();
     const arr = this.state[col];
     const idx = arr.findIndex((x) => x.id === obj.id);
     if (idx >= 0) arr[idx] = obj;
@@ -289,8 +328,9 @@ export class Repo {
   putPhoto(p) {
     return this.backend.putPhoto(p);
   }
-  getPhoto(id) {
-    return this.backend.getPhoto(id);
+  async getPhoto(id) {
+    const p = await this.backend.getPhoto(id);
+    return p ? sanitizeRecord('photos', p) : null;
   }
   delPhoto(id) {
     return this.backend.delPhoto(id);
@@ -301,7 +341,17 @@ export class Repo {
 export async function readLocalDump() {
   const b = new LocalBackend();
   await b.start(() => {});
-  return b.dumpAll();
+  const dump = await b.dumpAll();
+  b.stop();
+  return dump;
+}
+
+// Vacía el modo local de este dispositivo (después de subir sus datos a la cuenta)
+export async function clearLocalData() {
+  const b = new LocalBackend();
+  await b.start(() => {});
+  await b.clearAll();
+  b.stop();
 }
 
 export function uid() {
