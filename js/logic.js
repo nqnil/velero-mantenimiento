@@ -56,6 +56,9 @@ export function hourPoints(state) {
   for (const f of state.fuel || []) {
     if (isNum(f.engineHours)) pts.push({ date: f.date, hours: f.engineHours, t: at(f), o: 0 });
   }
+  for (const i of state.issues || []) {
+    if (i.status === 'hecho' && i.doneDate && isNum(i.engineHours)) pts.push({ date: i.doneDate, hours: i.engineHours, t: at(i), o: 0 });
+  }
   pts.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.t < b.t ? -1 : a.t > b.t ? 1 : a.o - b.o || a.hours - b.hours));
   return pts;
 }
@@ -225,6 +228,19 @@ export function sortStatuses(list) {
 export function interventionCost(i) {
   if (i.doneBy === 'taller') return num(i.invoiceTotal);
   return (i.materials || []).reduce((s, m) => s + num(m.cost), 0);
+}
+
+// Un correctivo solo tiene coste cuando está hecho (mismo formato: material o factura)
+export function issueCost(i) {
+  return i.status === 'hecho' ? interventionCost(i) : 0;
+}
+
+const PRIORITY_ORDER = { urgente: 0, alta: 1, media: 2, baja: 3 };
+export function sortIssues(list) {
+  return [...list].sort((a, b) =>
+    (PRIORITY_ORDER[a.priority] ?? 2) - (PRIORITY_ORDER[b.priority] ?? 2) ||
+    (a.detectedDate || '').localeCompare(b.detectedDate || '') ||
+    (a.title || '').localeCompare(b.title || '', 'es'));
 }
 
 // ── Bitácora y combustible ───────────────────────────────────────────
@@ -434,6 +450,30 @@ export function sanitizeRecord(col, o) {
         notes: str(o.notes),
       };
     }
+    case 'issues': {
+      if (!str(o.title).trim() || !isDate(o.detectedDate)) return null;
+      const done = o.status === 'hecho' && isDate(o.doneDate);
+      return {
+        ...base,
+        title: str(o.title, 200),
+        area: str(o.area, 40) || 'otros',
+        priority: ['urgente', 'alta', 'media', 'baja'].includes(o.priority) ? o.priority : 'media',
+        description: str(o.description),
+        detectedDate: o.detectedDate,
+        problemPhotoIds: Array.isArray(o.problemPhotoIds) ? o.problemPhotoIds.filter((x) => typeof x === 'string') : [],
+        status: done ? 'hecho' : 'pendiente',
+        doneDate: done ? o.doneDate : '',
+        work: done ? str(o.work) : '',
+        engineHours: done ? optNum(o.engineHours) : null,
+        doneBy: o.doneBy === 'taller' ? 'taller' : 'yo',
+        materials: done && Array.isArray(o.materials)
+          ? o.materials.filter((m) => m && typeof m === 'object').map((m) => ({ desc: str(m.desc, 300), cost: optNum(m.cost) ?? 0 }))
+          : [],
+        workshop: done ? str(o.workshop, 200) : '',
+        invoiceTotal: done ? optNum(o.invoiceTotal) : null,
+        photoIds: done && Array.isArray(o.photoIds) ? o.photoIds.filter((x) => typeof x === 'string') : [],
+      };
+    }
     case 'readings':
       if (!isDate(o.date) || optNum(o.hours) === null) return null;
       return { ...base, date: o.date, hours: o.hours };
@@ -481,6 +521,7 @@ export function sanitizeRecord(col, o) {
       if (optNum(o.noticeHours) !== null) m.noticeHours = o.noticeHours;
       if (optNum(o.noticeDays) !== null) m.noticeDays = o.noticeDays;
       if (Array.isArray(o.deletedDefaults)) m.deletedDefaults = o.deletedDefaults.filter((x) => typeof x === 'string');
+      if (Number.isInteger(o.areasVersion)) m.areasVersion = o.areasVersion;
       return m;
     }
     case 'photos':

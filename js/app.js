@@ -1,7 +1,7 @@
-import { DEFAULT_TASKS, DEFAULT_SETTINGS, SYSTEMS } from './tasks-default.js';
+import { DEFAULT_TASKS, DEFAULT_SETTINGS, SYSTEMS, AREAS, AREAS_VERSION, PRIORITIES } from './tasks-default.js';
 import {
   todayStr, addMonths, daysBetween, currentHours, usageRate, allStatuses, sortStatuses,
-  taskStatus, lastInterventionFor, interventionCost, buildICS, isNum, num, parseNum, round1,
+  taskStatus, lastInterventionFor, interventionCost, issueCost, sortIssues, buildICS, isNum, num, parseNum, round1,
   fmtDate, fmtMoney, fmtHours, hourPoints, sanitizeRecord, tripEngineHours, tripDays, tripStats, fuelCost, fuelConsumption,
 } from './logic.js';
 import {
@@ -9,20 +9,37 @@ import {
   readLocalDump, clearLocalData, COLLECTIONS,
 } from './store.js';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const repo = new Repo();
 const $view = document.getElementById('view');
 const $sync = document.getElementById('sync');
 let seededCloud = false;
 let draft = null; // formulario de intervención en curso
 let tripDraft = null; // formulario de navegación o repostaje en curso
+let issueDraft = null; // formulario de correctivo (alta, edición o cierre)
 let lastRoute = '';
 
 // ───────────────────────── Utilidades ─────────────────────────
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const sysName = (id) => (SYSTEMS.find((s) => s.id === id) || { name: 'Otros' }).name;
+const sysName = (id) => {
+  if (id === 'combustible') return 'Combustible';
+  if (id === 'varios') return 'Varias áreas';
+  return (AREAS.find((s) => s.id === id) || { name: 'Otros' }).name;
+};
+const areaName = sysName;
+const validArea = (id) => AREAS.some((a) => a.id === id);
+const prioName = (id) => (PRIORITIES.find((p) => p.id === id) || PRIORITIES[2]).name;
+
+function areaSelect(name, value, { all = false, extra = [] } = {}) {
+  const opts = [
+    ...(all ? [{ id: '', name: 'Todas las áreas' }] : []),
+    ...AREAS,
+    ...extra,
+  ];
+  return `<select name="${esc(name)}">${opts.map((a) => `<option value="${esc(a.id)}" ${a.id === value ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>`;
+}
 
 function settings() {
   const doc = repo.state.meta.find((m) => m.id === 'settings') || {};
@@ -281,7 +298,23 @@ async function ensureDefaults() {
   const have = new Set(repo.state.tasks.map((t) => t.id));
   const missing = DEFAULT_TASKS.filter((t) => !have.has(t.id) && !deleted.has(t.id));
   for (const t of missing) await repo.put('tasks', { ...t, createdAt: new Date().toISOString() });
-  if (!repo.state.meta.find((m) => m.id === 'settings')) await saveSettings({});
+  if (!repo.state.meta.find((m) => m.id === 'settings')) await saveSettings({ areasVersion: AREAS_VERSION });
+  await migrateAreas();
+}
+
+// v1.3: las tareas pasan de «sistemas» a «áreas» más finas.
+// Las predefinidas toman su área nueva; las propias con un sistema que ya no existe, la más parecida.
+async function migrateAreas() {
+  const s = settings();
+  if ((s.areasVersion || 1) >= AREAS_VERSION) return;
+  const byId = new Map(DEFAULT_TASKS.map((t) => [t.id, t]));
+  const OLD = { jarcia: 'jarcia-labor' };
+  for (const t of repo.state.tasks) {
+    const def = t.builtin ? byId.get(t.id) : null;
+    const area = def ? def.system : validArea(t.system) ? t.system : OLD[t.system] || 'otros';
+    if (area !== t.system) await repo.put('tasks', { ...t, system: area });
+  }
+  await saveSettings({ areasVersion: AREAS_VERSION });
 }
 
 let renderQueued = false;
@@ -295,7 +328,7 @@ function scheduleRender() {
 }
 
 // Las pantallas con formulario no se repintan solas, para no perder lo que escribes.
-const FORM_ROUTES = new Set(['registrar', 'editar-intervencion', 'editar-tarea', 'ajustes', 'nueva-tarea', 'navegar', 'editar-navegacion', 'repostar', 'editar-repostaje']);
+const FORM_ROUTES = new Set(['registrar', 'editar-intervencion', 'editar-tarea', 'ajustes', 'nueva-tarea', 'navegar', 'editar-navegacion', 'repostar', 'editar-repostaje', 'nuevo-correctivo', 'editar-correctivo', 'cerrar-correctivo']);
 
 function render(force) {
   const r = route();
@@ -303,6 +336,7 @@ function render(force) {
   if (!force && FORM_ROUTES.has(formKey)) return;
   // Un formulario que se abandona no debe reaparecer relleno la próxima vez
   if (draft && draft.key !== location.hash) draft = null;
+  if (issueDraft && issueDraft.key !== location.hash) issueDraft = null;
   if (tripDraft && tripDraft.key !== location.hash) tripDraft = null;
   const routeId = location.hash;
   const scroll = routeId === lastRoute ? window.scrollY : 0;
@@ -315,7 +349,12 @@ function render(force) {
     case 'intervencion': html = viewIntervention(r.parts[1]); break;
     case 'registrar': html = viewRegister(r); break;
     case 'editar-intervencion': html = viewRegister(r, r.parts[1]); break;
-    case 'tareas': html = viewTasks(); break;
+    case 'tareas': html = viewWork(r, 'preventivos'); break;
+    case 'trabajos': html = viewWork(r); break;
+    case 'correctivo': html = viewIssue(r.parts[1]); break;
+    case 'nuevo-correctivo': html = viewIssueForm(r); break;
+    case 'editar-correctivo': html = viewIssueForm(r, r.parts[1]); break;
+    case 'cerrar-correctivo': html = viewIssueClose(r.parts[1]); break;
     case 'tarea': html = viewTask(r.parts[1]); break;
     case 'editar-tarea': html = viewTaskEdit(r.parts[1]); break;
     case 'nueva-tarea': html = viewTaskEdit(null); break;
@@ -343,12 +382,16 @@ function formRouteKey(r) {
   if (a === 'tarea' && c === 'editar') return 'editar-tarea';
   if (a === 'navegacion' && c === 'editar') return 'editar-navegacion';
   if (a === 'repostaje' && c === 'editar') return 'editar-repostaje';
+  if (a === 'correctivo' && b === 'nuevo') return 'nuevo-correctivo';
+  if (a === 'correctivo' && c === 'editar') return 'editar-correctivo';
+  if (a === 'correctivo' && c === 'cerrar') return 'cerrar-correctivo';
   return a || '';
 }
 
 function setNav(key) {
   const map = {
-    '': 'home', tarea: 'home', horas: 'home', tareas: 'home',
+    '': 'home', horas: 'home',
+    tarea: 'work', tareas: 'work', trabajos: 'work', correctivo: 'work',
     bitacora: 'trips', navegacion: 'trips', navegar: 'add',
     historial: 'log', intervencion: 'log', repostaje: 'log',
     ajustes: 'gear', registrar: 'add', nuevo: 'add', repostar: 'add',
@@ -411,10 +454,12 @@ function viewHome() {
 
   <div class="quick">
     <a class="btn primary" href="#/navegar">Registrar navegación</a>
+    <a class="btn" href="#/correctivo/nuevo">Correctivo</a>
+    <a class="btn" href="#/registrar">Preventivo</a>
     <a class="btn" href="#/repostar">Repostaje</a>
-    <a class="btn" href="#/registrar">Mantenimiento</a>
   </div>
   ${lastTripLine()}
+  ${pendingIssuesBlock()}
 
   ${blank ? `
   <section class="notice">
@@ -423,8 +468,8 @@ function viewHome() {
     <a class="btn primary" href="#/registrar">Registrar una intervención</a>
   </section>` : ''}
 
-  ${groups.overdue.length ? `<section><h2 class="grp overdue">Vencidas <span class="count">${groups.overdue.length}</span></h2>${list(groups.overdue)}</section>` : ''}
-  ${groups.soon.length ? `<section><h2 class="grp soon">Toca pronto <span class="count">${groups.soon.length}</span></h2>${list(groups.soon)}</section>` : ''}
+  ${groups.overdue.length ? `<section><h2 class="grp overdue">Preventivo vencido <span class="count">${groups.overdue.length}</span></h2>${list(groups.overdue)}</section>` : ''}
+  ${groups.soon.length ? `<section><h2 class="grp soon">Preventivo que toca pronto <span class="count">${groups.soon.length}</span></h2>${list(groups.soon)}</section>` : ''}
   ${!groups.overdue.length && !groups.soon.length && !blank ? `<p class="allclear">Nada vencido ni próximo. Buen viento.</p>` : ''}
   ${groups.nohistory.length ? `
   <details class="fold" ${blank ? '' : ''}>
@@ -437,8 +482,19 @@ function viewHome() {
     <summary><h2 class="grp ok">Al día <span class="count">${groups.ok.length}</span></h2></summary>
     ${list(groups.ok)}
   </details>` : ''}
-  <p class="more"><a href="#/tareas">Ver y editar todas las tareas</a></p>
+  <p class="more"><a href="#/trabajos?tipo=preventivos">Ver y editar las tareas de mantenimiento preventivo</a></p>
   `;
+}
+
+function pendingIssuesBlock() {
+  const open = sortIssues(repo.state.issues.filter((i) => i.status !== 'hecho'));
+  if (!open.length) return '';
+  const shown = open.slice(0, 5);
+  return `<section>
+    <h2 class="grp ${open.some((i) => i.priority === 'urgente') ? 'overdue' : 'soon'}">Correctivos pendientes <span class="count">${open.length}</span></h2>
+    <ul class="rows">${shown.map((i) => issueRow(i)).join('')}</ul>
+    ${open.length > shown.length ? `<p class="more"><a href="#/trabajos">Ver los ${open.length} correctivos pendientes</a></p>` : ''}
+  </section>`;
 }
 
 function lastTripLine() {
@@ -547,68 +603,98 @@ function logRow(i) {
   </a></li>`;
 }
 
+const HIST_TYPES = [
+  { id: 'todo', name: 'Todo' },
+  { id: 'preventivo', name: 'Preventivo' },
+  { id: 'correctivo', name: 'Correctivo' },
+  { id: 'combustible', name: 'Combustible' },
+];
+
+function interventionAreas(i) {
+  const set = new Set((i.taskIds || []).map((id) => taskById(id)?.system).filter(Boolean));
+  return set.size ? set : new Set(['otros']);
+}
+
 function viewHistory(r) {
-  const kindParam = r.params.get('tipo');
-  const kind = ['todo', 'mantenimiento', 'combustible'].includes(kindParam) ? kindParam : 'todo';
+  let kindParam = r.params.get('tipo');
+  if (kindParam === 'mantenimiento') kindParam = 'preventivo'; // enlaces antiguos
+  const kind = HIST_TYPES.some((t) => t.id === kindParam) ? kindParam : 'todo';
+  const areaParam = r.params.get('area') || '';
+  const area = validArea(areaParam) || areaParam === 'combustible' ? areaParam : '';
   const entries = [
-    ...repo.state.interventions.map((i) => ({ kind: 'mant', date: i.date, obj: i, cost: interventionCost(i) })),
-    ...repo.state.fuel.map((f) => ({ kind: 'fuel', date: f.date, obj: f, cost: fuelCost(f) })),
+    ...repo.state.interventions.map((i) => ({ kind: 'preventivo', date: i.date, obj: i, cost: interventionCost(i), areas: interventionAreas(i) })),
+    ...repo.state.issues.filter((i) => i.status === 'hecho').map((i) => ({ kind: 'correctivo', date: i.doneDate, obj: i, cost: issueCost(i), areas: new Set([i.area]) })),
+    ...repo.state.fuel.map((f) => ({ kind: 'combustible', date: f.date, obj: f, cost: fuelCost(f), areas: new Set(['combustible']) })),
   ].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   const years = [...new Set(entries.map((e) => e.date.slice(0, 4)))].sort().reverse();
   let year = r.params.get('anio') || (years[0] || '');
   if (year !== 'todo' && !years.includes(year)) year = years[0] || '';
-  const inYear = year === 'todo' ? entries : entries.filter((e) => e.date.startsWith(year));
-  const list = kind === 'todo' ? inYear : inYear.filter((e) => e.kind === (kind === 'combustible' ? 'fuel' : 'mant'));
+  const list = entries.filter((e) =>
+    (year === 'todo' || e.date.startsWith(year)) &&
+    (kind === 'todo' || e.kind === kind) &&
+    (!area || e.areas.has(area)));
   const total = list.reduce((s, e) => s + e.cost, 0);
   const groups = {};
   for (const e of list) {
-    const k = e.kind === 'fuel' ? 'combustible' : interventionSystem(e.obj);
+    const k = area ? e.kind : e.areas.size === 1 ? [...e.areas][0] : 'varios';
     groups[k] = (groups[k] || 0) + e.cost;
   }
   const rows = Object.entries(groups).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
   const max = Math.max(1, ...rows.map(([, v]) => v));
-  const label = (k) => (k === 'combustible' ? 'Combustible' : k === 'varios' ? 'Varios sistemas' : sysName(k));
-  const mant = list.filter((e) => e.kind === 'mant');
-  const mine = mant.filter((e) => e.obj.doneBy !== 'taller').reduce((s, e) => s + e.cost, 0);
-  const shops = mant.reduce((s, e) => s + e.cost, 0) - mine;
-  const fuelList = list.filter((e) => e.kind === 'fuel').map((e) => e.obj);
+  const label = (k) => (area ? (HIST_TYPES.find((t) => t.id === k) || {}).name : areaName(k));
+  const work = list.filter((e) => e.kind !== 'combustible');
+  const mine = work.filter((e) => e.obj.doneBy !== 'taller').reduce((s, e) => s + e.cost, 0);
+  const shops = work.reduce((s, e) => s + e.cost, 0) - mine;
+  const fuelList = list.filter((e) => e.kind === 'combustible').map((e) => e.obj);
   const liters = fuelList.reduce((s, f) => s + num(f.liters), 0);
   const cons = fuelConsumption(repo.state.fuel);
-  const q = (k, y) => esc(`#/historial?tipo=${encodeURIComponent(k)}&anio=${encodeURIComponent(y)}`);
+  const q = (k, y, a = area) => esc(`#/historial?tipo=${encodeURIComponent(k)}&anio=${encodeURIComponent(y)}${a ? `&area=${encodeURIComponent(a)}` : ''}`);
 
   if (!entries.length) {
     return `<h1>Historial</h1>
-    <section class="notice"><p>Aún no hay nada registrado. Cada vez que hagas o encargues un mantenimiento, o eches combustible, apúntalo aquí con la fecha y el coste.</p>
-    <div class="actions"><a class="btn primary" href="#/registrar">Registrar mantenimiento</a><a class="btn" href="#/repostar">Registrar repostaje</a></div></section>`;
+    <section class="notice"><p>Aún no hay nada registrado. Aquí verás el mantenimiento preventivo, los correctivos hechos y el combustible, con lo que ha costado cada cosa.</p>
+    <div class="actions"><a class="btn primary" href="#/registrar">Registrar preventivo</a><a class="btn" href="#/repostar">Registrar repostaje</a></div></section>`;
   }
 
   const count = list.length;
-  const what = kind === 'combustible' ? (count === 1 ? 'repostaje' : 'repostajes')
-    : kind === 'mantenimiento' ? (count === 1 ? 'intervención' : 'intervenciones')
-    : (count === 1 ? 'apunte' : 'apuntes');
-
   return `
   <h1>Historial</h1>
   <nav class="chips" aria-label="Tipo">
-    <a href="${q('todo', year)}" ${kind === 'todo' ? 'aria-current="true"' : ''}>Todo</a>
-    <a href="${q('mantenimiento', year)}" ${kind === 'mantenimiento' ? 'aria-current="true"' : ''}>Mantenimiento</a>
-    <a href="${q('combustible', year)}" ${kind === 'combustible' ? 'aria-current="true"' : ''}>Combustible</a>
+    ${HIST_TYPES.map((t) => `<a href="${q(t.id, year)}" ${kind === t.id ? 'aria-current="true"' : ''}>${esc(t.name)}</a>`).join('')}
   </nav>
   <nav class="chips" aria-label="Año">
     ${years.map((y) => `<a href="${q(kind, y)}" ${y === year ? 'aria-current="true"' : ''}>${esc(y)}</a>`).join('')}
     <a href="${q(kind, 'todo')}" ${year === 'todo' ? 'aria-current="true"' : ''}>Todos los años</a>
   </nav>
+  <form class="areafilter" id="hist-area" data-tipo="${esc(kind)}" data-anio="${esc(year)}">
+    <label>Área ${areaSelect('area', area, { all: true, extra: [{ id: 'combustible', name: 'Combustible' }] })}</label>
+  </form>
   <section class="spend">
-    <p class="spend-total"><span class="money big">${fmtMoney(total)}</span> en ${count} ${what}${year === 'todo' ? '' : ` en ${year}`}</p>
-    ${kind !== 'combustible' && mant.length ? `<p class="muted">Mantenimiento: material propio ${fmtMoney(mine)}, talleres ${fmtMoney(shops)}.</p>` : ''}
-    ${kind !== 'mantenimiento' && fuelList.length ? `<p class="muted">Combustible: ${fmtNum(liters)} L${pplText(fuelList)}.${cons ? ` Consumo medio del motor: ${fmtNum(cons.lph, 2)} L/h.` : ''}</p>` : ''}
-    ${rows.length > 1 || (rows.length === 1 && kind === 'todo') ? `<ul class="bars">${rows.map(([k, v]) => `
+    <p class="spend-total"><span class="money big">${fmtMoney(total)}</span> en ${count} ${count === 1 ? 'apunte' : 'apuntes'}${year === 'todo' ? '' : ` en ${esc(year)}`}${area ? `, ${esc(areaName(area).toLowerCase())}` : ''}</p>
+    ${work.length ? `<p class="muted">Trabajos: material propio ${fmtMoney(mine)}, talleres ${fmtMoney(shops)}.</p>` : ''}
+    ${fuelList.length ? `<p class="muted">Combustible: ${fmtNum(liters)} L${pplText(fuelList)}.${cons ? ` Consumo medio del motor: ${fmtNum(cons.lph, 2)} L/h.` : ''}</p>` : ''}
+    ${rows.length > 1 ? `<ul class="bars">${rows.map(([k, v]) => `
       <li><span class="bar-label">${esc(label(k))}</span>
       <span class="bar"><span class="${k === 'combustible' ? 'fuelbar' : ''}" style="width:${Math.max(2, (v / max) * 100)}%"></span></span>
       <span class="money">${fmtMoney(v)}</span></li>`).join('')}</ul>` : ''}
   </section>
-  ${list.length ? `<ul class="log">${list.map((e) => (e.kind === 'fuel' ? fuelRow(e.obj) : logRow(e.obj))).join('')}</ul>`
+  ${list.length ? `<ul class="log">${list.map((e) => (e.kind === 'combustible' ? fuelRow(e.obj) : e.kind === 'correctivo' ? issueLogRow(e.obj) : logRow(e.obj))).join('')}</ul>`
     : '<p class="muted">Nada registrado con este filtro.</p>'}`;
+}
+
+function issueLogRow(i) {
+  const cost = issueCost(i);
+  const photos = (i.photoIds || []).length;
+  return `<li><a class="logrow" href="#/correctivo/${encodeURIComponent(i.id)}">
+    <time datetime="${esc(i.doneDate)}">${fmtDate(i.doneDate)}</time>
+    <span class="log-title">Correctivo: ${esc(i.title)}</span>
+    <span class="log-meta">
+      <span>${esc(areaName(i.area))}</span>
+      <span>${i.doneBy === 'taller' ? esc(i.workshop || 'Taller') : 'Yo'}</span>
+      ${cost ? `<span class="money">${fmtMoney(cost)}</span>` : ''}
+      ${photos ? `<span class="pic">${ICON.cam}${photos}</span>` : ''}
+    </span>
+  </a></li>`;
 }
 
 function pplText(list) {
@@ -637,7 +723,7 @@ function viewIntervention(id) {
     ${i.doneBy !== 'taller' && (i.materials || []).length ? `<h2>Material</h2>
       <table class="mat"><tbody>${i.materials.map((m) => `<tr><td>${esc(m.desc)}</td><td class="money">${fmtMoney(num(m.cost))}</td></tr>`).join('')}</tbody></table>` : ''}
     ${i.notes ? `<h2>Notas</h2><p class="note pre">${esc(i.notes)}</p>` : ''}
-    ${(i.photoIds || []).length ? `<h2>Factura</h2><div class="thumbs" id="thumbs">${i.photoIds.map((p) => `<button class="thumb" data-action="open-photo" data-id="${esc(p)}" aria-label="Abrir factura"><span class="ph-loading">Cargando…</span></button>`).join('')}</div>` : ''}
+    ${(i.photoIds || []).length ? `<h2>Factura</h2><div class="thumbs" id="thumbs" data-photos>${i.photoIds.map((p) => `<button class="thumb" data-action="open-photo" data-id="${esc(p)}" aria-label="Abrir factura"><span class="ph-loading">Cargando…</span></button>`).join('')}</div>` : ''}
     <div class="actions">
       <a class="btn primary" href="#/intervencion/${encodeURIComponent(i.id)}/editar">Editar</a>
       <button class="btn danger" data-action="delete-intervention" data-id="${esc(i.id)}">Borrar</button>
@@ -654,7 +740,7 @@ function multiTitle(i, tasks) {
 const photoCache = new Map();
 
 async function loadThumbs() {
-  const btns = document.querySelectorAll('#thumbs .thumb');
+  const btns = document.querySelectorAll('[data-photos] .thumb');
   for (const b of btns) {
     const p = await repo.getPhoto(b.dataset.id);
     if (!b.isConnected) return;
@@ -806,15 +892,19 @@ function expiryFields() {
   </fieldset>`;
 }
 
-function costBlock() {
-  const d = draft;
+// Borrador del formulario visible (mantenimiento o correctivo)
+function curDraft() {
+  return issueDraft && issueDraft.key === location.hash ? issueDraft : draft;
+}
+
+function costBlock(d = curDraft()) {
   if (d.doneBy === 'taller') {
     return `<fieldset><legend>Factura</legend>
       <div class="grid2">
         <label>Taller o profesional<input type="text" data-f="workshop" value="${esc(d.workshop)}" placeholder="Nombre"></label>
         <label>Total de la factura (€)<input type="text" data-f="invoiceTotal" inputmode="decimal" value="${esc(d.invoiceTotal)}"></label>
       </div>
-      <div class="thumbs" id="draft-photos">${draftPhotos()}</div>
+      <div class="thumbs" id="draft-photos">${draftPhotos(d)}</div>
       <label class="btn file">${ICON.cam}<span>Añadir foto o PDF de la factura</span>
         <input type="file" id="photo-input" class="sr" accept="image/*,application/pdf" multiple></label>
     </fieldset>`;
@@ -832,24 +922,65 @@ function costBlock() {
   </fieldset>`;
 }
 
-function draftPhotos() {
-  return draft.photos.map((p, idx) => `
+// list: 'photos' (factura) o 'problemPhotos' (fotos de la avería)
+const PHOTO_BOX = { photos: 'draft-photos', problemPhotos: 'problem-photos' };
+
+function draftPhotos(d = curDraft(), list = 'photos') {
+  const alt = list === 'photos' ? 'Factura' : 'Foto';
+  return (d[list] || []).map((p, idx) => `
     <div class="thumb" data-ph="${idx}">
-      ${p.data ? (p.mime === 'application/pdf' ? `<span class="pdf">PDF<br>${esc(p.name || '')}</span>` : `<img src="${esc(p.data)}" alt="Factura ${idx + 1}">`) : '<span class="ph-loading">Cargando…</span>'}
-      <button type="button" class="icon del" data-action="del-photo" data-idx="${idx}" aria-label="Quitar foto">${ICON.trash}</button>
+      ${p.data ? (p.mime === 'application/pdf' ? `<span class="pdf">PDF<br>${esc(p.name || '')}</span>` : `<img src="${esc(p.data)}" alt="${alt} ${idx + 1}">`) : '<span class="ph-loading">Cargando…</span>'}
+      <button type="button" class="icon del" data-action="del-photo" data-list="${list}" data-idx="${idx}" aria-label="Quitar foto">${ICON.trash}</button>
     </div>`).join('');
 }
 
-async function loadDraftPhotos() {
-  let changed = false;
-  for (const p of draft.photos) {
-    if (p.existing && !p.data) {
-      const ph = await repo.getPhoto(p.id);
-      if (ph) { p.data = ph.data; p.mime = ph.mime; p.name = ph.name; changed = true; }
+async function loadDraftPhotos(d = curDraft()) {
+  for (const list of Object.keys(PHOTO_BOX)) {
+    let changed = false;
+    for (const p of d[list] || []) {
+      if (p.existing && !p.data) {
+        const ph = await repo.getPhoto(p.id);
+        if (ph) { p.data = ph.data; p.mime = ph.mime; p.name = ph.name; changed = true; }
+      }
+    }
+    const el = document.getElementById(PHOTO_BOX[list]);
+    if (changed && el) el.innerHTML = draftPhotos(d, list);
+  }
+}
+
+// Campos comunes de coste (material o factura) y fotos. Devuelven true si han tratado el evento.
+function handleCostInput(el, d) {
+  if (el.dataset.f) { d[el.dataset.f] = el.value; return true; }
+  if (el.dataset.mat !== undefined) {
+    d.materials[+el.dataset.mat][el.dataset.k] = el.value;
+    const tot = document.getElementById('mat-total');
+    if (tot) tot.textContent = fmtMoney(d.materials.reduce((s, m) => s + num(m.cost), 0));
+    return true;
+  }
+  return false;
+}
+
+async function handleCostChange(el, d) {
+  if (el.name === 'doneBy') {
+    d.doneBy = el.value;
+    document.getElementById('cost-block').innerHTML = costBlock(d);
+    loadDraftPhotos(d);
+    return true;
+  }
+  const list = el.id === 'photo-input' ? 'photos' : el.id === 'problem-input' ? 'problemPhotos' : null;
+  if (!list) return false;
+  const files = [...el.files];
+  el.value = '';
+  for (const f of files) {
+    try {
+      d[list].push(await fileToPhoto(f));
+    } catch (err) {
+      toast(err.message);
     }
   }
-  const el = document.getElementById('draft-photos');
-  if (changed && el) el.innerHTML = draftPhotos();
+  document.getElementById(PHOTO_BOX[list]).innerHTML = draftPhotos(d, list);
+  storeDraft(d);
+  return true;
 }
 
 function bindRegister() {
@@ -869,12 +1000,7 @@ function bindRegister() {
     else if (el.name === 'notes') d.notes = el.value;
     else if (el.id === 'task-filter') { d.filter = el.value; document.getElementById('picklist').innerHTML = pickList(); }
     else if (el.dataset.expiry) d.expiries[el.dataset.expiry] = el.value;
-    else if (el.dataset.f) d[el.dataset.f] = el.value;
-    else if (el.dataset.mat !== undefined) {
-      d.materials[+el.dataset.mat][el.dataset.k] = el.value;
-      const tot = document.getElementById('mat-total');
-      if (tot) tot.textContent = fmtMoney(d.materials.reduce((s, m) => s + num(m.cost), 0));
-    }
+    else handleCostInput(el, d);
   });
   form.addEventListener('change', async (e) => {
     const el = e.target;
@@ -882,30 +1008,15 @@ function bindRegister() {
     if (el.dataset.pick) {
       if (el.checked) d.taskIds.add(el.dataset.pick); else d.taskIds.delete(el.dataset.pick);
       refreshPicked();
-    } else if (el.name === 'doneBy') {
-      d.doneBy = el.value;
-      document.getElementById('cost-block').innerHTML = costBlock();
-      loadDraftPhotos();
-    } else if (el.id === 'photo-input') {
-      const files = [...el.files];
-      el.value = '';
-      for (const f of files) {
-        try {
-          const ph = await fileToPhoto(f);
-          d.photos.push(ph);
-        } catch (err) {
-          toast(err.message);
-        }
-      }
-      document.getElementById('draft-photos').innerHTML = draftPhotos();
-      storeDraft(d);
+    } else {
+      await handleCostChange(el, d);
     }
   });
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     guarded(form, saveDraft);
   });
-  loadDraftPhotos();
+  loadDraftPhotos(d);
 }
 
 function refreshPicked() {
@@ -1016,40 +1127,21 @@ function readAsDataURL(file) {
 }
 
 // ───────────────────────── Tareas ─────────────────────────
-function viewTasks() {
-  const st = settings();
-  const statuses = allStatuses(repo.state, st);
-  const bySys = {};
-  for (const s of statuses) (bySys[s.task.system] ||= []).push(s);
-  return `
-  <div class="titlebar"><h1>Tareas</h1><a class="btn small" href="#/tarea/nueva">Nueva tarea</a></div>
-  <p class="muted">Toca una tarea para ver su historial o cambiar el intervalo. Las desactivadas no generan avisos.</p>
-  ${SYSTEMS.filter((s) => bySys[s.id]).map((sys) => `
-    <section>
-      <h2>${esc(sys.name)}</h2>
-      <ul class="rows">${bySys[sys.id].sort((a, b) => a.task.name.localeCompare(b.task.name, 'es')).map((s) => `
-        <li><a class="row st-${s.status}" href="#/tarea/${encodeURIComponent(s.task.id)}">
-          <span class="flag" aria-hidden="true"></span>
-          <span class="row-main"><span class="row-title">${esc(s.task.name)}</span>
-          <span class="row-sub">${esc(intervalText(s.task))}. ${STATUS_LABEL[s.status]}.</span></span>
-        </a></li>`).join('')}</ul>
-    </section>`).join('')}`;
-}
-
 function viewTaskEdit(id) {
   const st = settings();
+  const areaParam = route().params.get('area');
   const t = id ? taskById(id) : {
-    id: 'u-' + uid().slice(0, 8), system: 'otros', name: '', type: 'intervalo', intervalHours: null,
+    id: 'u-' + uid().slice(0, 8), system: validArea(areaParam) ? areaParam : 'otros', name: '', type: 'intervalo', intervalHours: null,
     intervalMonths: 12, noticeHours: null, noticeDays: null, active: true, notes: '', builtin: false,
   };
   if (!t) return notFound('Esta tarea ya no existe.');
-  const back = id ? `#/tarea/${encodeURIComponent(id)}` : '#/tareas';
+  const back = id ? `#/tarea/${encodeURIComponent(id)}` : '#/trabajos?tipo=preventivos';
   return `
   ${backLink(back, 'Cancelar')}
   <h1>${id ? 'Editar tarea' : 'Nueva tarea'}</h1>
   <form id="task-form" class="form" data-id="${esc(t.id)}" data-new="${id ? '0' : '1'}">
     <label>Nombre<input type="text" name="name" value="${esc(t.name)}" required></label>
-    <label>Sistema<select name="system">${SYSTEMS.map((s) => `<option value="${s.id}" ${s.id === t.system ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
+    <label>Área${areaSelect('system', validArea(t.system) ? t.system : 'otros')}</label>
     <fieldset class="seg">
       <legend>Cómo se calcula la próxima</legend>
       <label><input type="radio" name="type" value="intervalo" ${t.type !== 'caducidad' ? 'checked' : ''}><span>Por intervalo</span></label>
@@ -1358,8 +1450,8 @@ async function exportICS() {
 async function exportJSON() {
   const photos = [];
   let missing = 0;
-  for (const i of repo.state.interventions) {
-    for (const id of i.photoIds || []) {
+  for (const i of [...repo.state.interventions, ...repo.state.issues]) {
+    for (const id of [...(i.photoIds || []), ...(i.problemPhotoIds || [])]) {
       const p = await repo.getPhoto(id);
       if (p) photos.push(p);
       else missing++;
@@ -1374,6 +1466,7 @@ async function exportJSON() {
     readings: repo.state.readings,
     trips: repo.state.trips,
     fuel: repo.state.fuel,
+    issues: repo.state.issues,
     meta: repo.state.meta,
     photos,
   };
@@ -1470,8 +1563,26 @@ function bindView(key) {
     bindTripForm();
   } else if (key === 'repostar' || key === 'editar-repostaje') {
     bindFuelForm();
-  } else if (key === 'intervencion') {
+  } else if (key === 'intervencion' || key === 'correctivo') {
     loadThumbs();
+  } else if (key === 'trabajos' || key === 'tareas') {
+    const f = document.getElementById('area-filter');
+    f?.addEventListener('change', (e) => {
+      const tipo = key === 'tareas' ? 'preventivos' : f.dataset.tipo;
+      location.hash = `#/trabajos?tipo=${tipo}${e.target.value ? `&area=${encodeURIComponent(e.target.value)}` : ''}`;
+    });
+    f?.addEventListener('submit', (e) => e.preventDefault());
+  } else if (key === 'historial') {
+    const f = document.getElementById('hist-area');
+    f?.addEventListener('change', (e) => {
+      const v = e.target.value;
+      location.hash = `#/historial?tipo=${encodeURIComponent(f.dataset.tipo)}&anio=${encodeURIComponent(f.dataset.anio)}${v ? `&area=${encodeURIComponent(v)}` : ''}`;
+    });
+    f?.addEventListener('submit', (e) => e.preventDefault());
+  } else if (key === 'nuevo-correctivo' || key === 'editar-correctivo') {
+    bindIssueForm();
+  } else if (key === 'cerrar-correctivo') {
+    bindIssueClose();
   } else if (key === 'horas') {
     const rf = document.getElementById('reading-form');
     rf.addEventListener('submit', (e) => {
@@ -1497,18 +1608,25 @@ async function onClick(e) {
     draft.taskIds.delete(el.dataset.id);
     refreshPicked();
   } else if (a === 'add-mat') {
-    draft.materials.push({ desc: '', cost: '' });
-    document.getElementById('cost-block').innerHTML = costBlock();
+    const d = curDraft();
+    d.materials.push({ desc: '', cost: '' });
+    markDirty(d);
+    document.getElementById('cost-block').innerHTML = costBlock(d);
     const inputs = document.querySelectorAll('[data-k="desc"]');
     inputs[inputs.length - 1]?.focus();
   } else if (a === 'del-mat') {
-    draft.materials.splice(+el.dataset.idx, 1);
-    if (!draft.materials.length) draft.materials.push({ desc: '', cost: '' });
-    document.getElementById('cost-block').innerHTML = costBlock();
+    const d = curDraft();
+    d.materials.splice(+el.dataset.idx, 1);
+    if (!d.materials.length) d.materials.push({ desc: '', cost: '' });
+    markDirty(d);
+    document.getElementById('cost-block').innerHTML = costBlock(d);
   } else if (a === 'del-photo') {
-    const [p] = draft.photos.splice(+el.dataset.idx, 1);
-    if (p?.existing) draft.removedPhotos.push(p.id);
-    document.getElementById('draft-photos').innerHTML = draftPhotos();
+    const d = curDraft();
+    const list = el.dataset.list === 'problemPhotos' ? 'problemPhotos' : 'photos';
+    const [p] = d[list].splice(+el.dataset.idx, 1);
+    if (p?.existing) d.removedPhotos.push(p.id);
+    markDirty(d);
+    document.getElementById(PHOTO_BOX[list]).innerHTML = draftPhotos(d, list);
   } else if (a === 'open-photo') {
     const p = photoCache.get(el.dataset.id) || (await repo.getPhoto(el.dataset.id));
     if (p) openPhoto(p);
@@ -1530,7 +1648,7 @@ async function onClick(e) {
     if (t?.builtin) await saveSettings({ deletedDefaults: [...new Set([...(settings().deletedDefaults || []), id])] });
     await repo.del('tasks', id);
     toast('Tarea borrada');
-    go('#/tareas');
+    go('#/trabajos?tipo=preventivos');
   } else if (a === 'delete-trip') {
     const t = repo.state.trips.find((x) => x.id === el.dataset.id);
     const msg = t?.fuelId ? '¿Borrar esta navegación y el repostaje apuntado en ella? No se puede deshacer.' : '¿Borrar esta navegación? No se puede deshacer.';
@@ -1549,6 +1667,21 @@ async function onClick(e) {
     await repo.del('fuel', el.dataset.id);
     toast('Repostaje borrado');
     go('#/historial?tipo=combustible');
+  } else if (a === 'delete-issue') {
+    if (!confirm('¿Borrar este correctivo y sus fotos? No se puede deshacer.')) return;
+    const i = issueById(el.dataset.id);
+    for (const pid of [...(i?.problemPhotoIds || []), ...(i?.photoIds || [])]) await repo.delPhoto(pid);
+    await repo.del('issues', el.dataset.id);
+    toast('Correctivo borrado');
+    go('#/trabajos');
+  } else if (a === 'reopen-issue') {
+    const i = issueById(el.dataset.id);
+    if (!i) return;
+    if (!confirm('¿Volver a ponerlo como pendiente? Se borrará el trabajo apuntado, su coste y la factura.')) return;
+    for (const pid of i.photoIds || []) await repo.delPhoto(pid);
+    await repo.put('issues', { ...i, status: 'pendiente', doneDate: '', work: '', engineHours: null, doneBy: 'yo', materials: [], workshop: '', invoiceTotal: null, photoIds: [] });
+    toast('Vuelve a estar pendiente');
+    render(true);
   } else if (a === 'delete-reading') {
     if (!confirm('¿Borrar esta lectura?')) return;
     await repo.del('readings', el.dataset.id);
@@ -1614,7 +1747,8 @@ function viewNew() {
   <h1>¿Qué quieres apuntar?</h1>
   <ul class="choices">
     <li><a href="#/navegar"><strong>Navegación</strong><span>Una salida al mar: puertos, horas de motor, millas y, si echaste, combustible.</span></a></li>
-    <li><a href="#/registrar"><strong>Mantenimiento</strong><span>Una tarea hecha por ti o por un taller, con material o factura.</span></a></li>
+    <li><a href="#/correctivo/nuevo"><strong>Correctivo</strong><span>Algo que has visto y hay que arreglar, con su prioridad. Lo marcarás como hecho al arreglarlo.</span></a></li>
+    <li><a href="#/registrar"><strong>Mantenimiento preventivo</strong><span>Una tarea periódica hecha por ti o por un taller (aceite, filtros, antifouling…), con material o factura.</span></a></li>
     <li><a href="#/repostar"><strong>Repostaje</strong><span>Combustible en surtidor o con garrafas, aunque no salgas a navegar.</span></a></li>
     <li><a href="#/horas"><strong>Horas de motor</strong><span>Solo la lectura del contador.</span></a></li>
   </ul>`;
@@ -2115,6 +2249,354 @@ async function saveFuel(d) {
     toast(d.isNew ? 'Repostaje guardado' : 'Cambios guardados');
     go(d.isNew ? '#/historial?tipo=combustible' : `#/repostaje/${encodeURIComponent(obj.id)}`);
   }
+}
+
+// ───────────────────────── Trabajos: correctivos y preventivos ─────────────────────────
+const PRIO_CLASS = { urgente: 'p-urgente', alta: 'p-alta', media: 'p-media', baja: 'p-baja' };
+
+function issueById(id) {
+  return repo.state.issues.find((x) => x.id === id);
+}
+
+function issueRow(i, { showArea = true } = {}) {
+  const done = i.status === 'hecho';
+  const sub = [showArea ? areaName(i.area) : '', done ? `hecho el ${fmtDate(i.doneDate)}` : `desde el ${fmtDate(i.detectedDate)}`].filter(Boolean).join(', ');
+  return `<li><a class="row ${done ? 'st-ok' : PRIO_CLASS[i.priority] || 'p-media'}" href="#/correctivo/${encodeURIComponent(i.id)}">
+    <span class="flag" aria-hidden="true"></span>
+    <span class="row-main">
+      <span class="row-title">${esc(i.title)}</span>
+      <span class="row-sub">${esc(sub.charAt(0).toUpperCase() + sub.slice(1))}</span>
+    </span>
+    <span class="row-due">${done ? (issueCost(i) ? `<span class="money">${fmtMoney(issueCost(i))}</span>` : 'Hecho') : esc(prioName(i.priority))}</span>
+  </a></li>`;
+}
+
+function workQuery(tipo, area) {
+  return esc(`#/trabajos?tipo=${encodeURIComponent(tipo)}${area ? `&area=${encodeURIComponent(area)}` : ''}`);
+}
+
+function viewWork(r, forced) {
+  const tipoParam = forced || r.params.get('tipo');
+  const tipo = tipoParam === 'preventivos' ? 'preventivos' : 'correctivos';
+  const areaParam = r.params.get('area') || '';
+  const area = validArea(areaParam) ? areaParam : '';
+  const pending = repo.state.issues.filter((i) => i.status !== 'hecho');
+  const head = `
+  <div class="titlebar"><h1>Trabajos</h1>
+    ${tipo === 'correctivos'
+      ? `<a class="btn small primary" href="#/correctivo/nuevo${area ? `?area=${encodeURIComponent(area)}` : ''}">Nuevo correctivo</a>`
+      : `<a class="btn small" href="#/tarea/nueva${area ? `?area=${encodeURIComponent(area)}` : ''}">Nueva tarea</a>`}
+  </div>
+  <nav class="seglinks" aria-label="Tipo de trabajo">
+    <a href="${workQuery('correctivos', area)}" ${tipo === 'correctivos' ? 'aria-current="true"' : ''}>Correctivos${pending.length ? ` <span class="count">${pending.length}</span>` : ''}</a>
+    <a href="${workQuery('preventivos', area)}" ${tipo === 'preventivos' ? 'aria-current="true"' : ''}>Preventivos</a>
+  </nav>
+  <form class="areafilter" id="area-filter" data-tipo="${tipo}">
+    <label>Área ${areaSelect('area', area, { all: true })}</label>
+  </form>`;
+
+  if (tipo === 'preventivos') return head + preventiveList(area);
+
+  const inArea = (i) => !area || i.area === area;
+  const open = sortIssues(pending.filter(inArea));
+  const done = repo.state.issues.filter((i) => i.status === 'hecho' && inArea(i))
+    .sort((a, b) => (a.doneDate < b.doneDate ? 1 : -1));
+  if (!repo.state.issues.length) {
+    return head + `<section class="notice"><p>Aquí van las cosas que encuentras y hay que arreglar: una polea rota, una vía de agua, un winch que patina… Apúntalas con su prioridad y márcalas como hechas cuando las arregles, con el trabajo y el coste.</p>
+    <a class="btn primary" href="#/correctivo/nuevo">Apuntar un correctivo</a></section>`;
+  }
+  return head + `
+  <section>
+    <h2 class="grp">Pendientes <span class="count">${open.length}</span></h2>
+    ${open.length ? `<ul class="rows">${open.map((i) => issueRow(i, { showArea: !area })).join('')}</ul>` : `<p class="allclear">Nada pendiente${area ? ' en esta área' : ''}.</p>`}
+  </section>
+  ${done.length ? `<details class="fold">
+    <summary><h2 class="grp ok">Hechos <span class="count">${done.length}</span></h2></summary>
+    <ul class="rows">${done.map((i) => issueRow(i, { showArea: !area })).join('')}</ul>
+  </details>` : ''}`;
+}
+
+function preventiveList(area) {
+  const st = settings();
+  const statuses = allStatuses(repo.state, st).filter((s) => !area || s.task.system === area);
+  const byArea = {};
+  for (const s of statuses) (byArea[validArea(s.task.system) ? s.task.system : 'otros'] ||= []).push(s);
+  if (!statuses.length) return '<p class="muted">No hay tareas de mantenimiento en esta área.</p>';
+  return `<p class="muted">Mantenimiento periódico, por horas de motor o por fecha. Toca una tarea para ver su historial o cambiar el intervalo.</p>
+  ${AREAS.filter((a) => byArea[a.id]).map((a) => `
+    <section>
+      <h2>${esc(a.name)}</h2>
+      <ul class="rows">${byArea[a.id].sort((x, y) => x.task.name.localeCompare(y.task.name, 'es')).map((s) => `
+        <li><a class="row st-${s.status}" href="#/tarea/${encodeURIComponent(s.task.id)}">
+          <span class="flag" aria-hidden="true"></span>
+          <span class="row-main"><span class="row-title">${esc(s.task.name)}</span>
+          <span class="row-sub">${esc(intervalText(s.task))}. ${STATUS_LABEL[s.status]}.</span></span>
+        </a></li>`).join('')}</ul>
+    </section>`).join('')}`;
+}
+
+function viewIssue(id) {
+  const i = issueById(id);
+  if (!i) return notFound('Este correctivo ya no existe.');
+  const done = i.status === 'hecho';
+  const cost = issueCost(i);
+  return `
+  ${backLink('#/trabajos', 'Trabajos')}
+  <article class="detail">
+    <p class="badge ${done ? 'st-ok' : PRIO_CLASS[i.priority]}">${done ? 'Hecho' : `Prioridad ${esc(prioName(i.priority).toLowerCase())}`}</p>
+    <h1>${esc(i.title)}</h1>
+    <dl class="facts">
+      <dt>Área</dt><dd><a href="${workQuery('correctivos', i.area)}">${esc(areaName(i.area))}</a></dd>
+      <dt>Detectado</dt><dd>${fmtDate(i.detectedDate)}</dd>
+      ${done ? '' : `<dt>Prioridad</dt><dd>${esc(prioName(i.priority))}: ${esc((PRIORITIES.find((p) => p.id === i.priority) || {}).hint || '')}</dd>`}
+    </dl>
+    ${i.description ? `<p class="note pre">${esc(i.description)}</p>` : ''}
+    ${(i.problemPhotoIds || []).length ? `<div class="thumbs" data-photos>${i.problemPhotoIds.map((p) => `<button class="thumb" data-action="open-photo" data-id="${esc(p)}" aria-label="Abrir foto"><span class="ph-loading">Cargando…</span></button>`).join('')}</div>` : ''}
+    ${done ? `
+    <section class="donebox">
+      <h2>Trabajo hecho</h2>
+      <dl class="facts">
+        <dt>Fecha</dt><dd>${fmtDate(i.doneDate)}</dd>
+        <dt>Hecho por</dt><dd>${i.doneBy === 'taller' ? esc(i.workshop || 'Taller') : 'Yo mismo'}</dd>
+        <dt>Coste</dt><dd>${fmtMoney(cost)}</dd>
+        ${isNum(i.engineHours) ? `<dt>Horas de motor</dt><dd>${fmtHours(i.engineHours)}</dd>` : ''}
+      </dl>
+      ${i.work ? `<p class="note pre">${esc(i.work)}</p>` : ''}
+      ${i.doneBy !== 'taller' && (i.materials || []).length ? `<table class="mat"><tbody>${i.materials.map((m) => `<tr><td>${esc(m.desc)}</td><td class="money">${fmtMoney(num(m.cost))}</td></tr>`).join('')}</tbody></table>` : ''}
+      ${(i.photoIds || []).length ? `<h3>Factura</h3><div class="thumbs" data-photos>${i.photoIds.map((p) => `<button class="thumb" data-action="open-photo" data-id="${esc(p)}" aria-label="Abrir factura"><span class="ph-loading">Cargando…</span></button>`).join('')}</div>` : ''}
+    </section>` : ''}
+    <div class="actions">
+      ${done
+        ? `<a class="btn" href="#/correctivo/${encodeURIComponent(i.id)}/cerrar">Editar trabajo hecho</a>
+           <button class="btn" data-action="reopen-issue" data-id="${esc(i.id)}">Volver a pendiente</button>`
+        : `<a class="btn primary" href="#/correctivo/${encodeURIComponent(i.id)}/cerrar">Marcar como hecho</a>`}
+      <a class="btn" href="#/correctivo/${encodeURIComponent(i.id)}/editar">Editar</a>
+      <button class="btn danger" data-action="delete-issue" data-id="${esc(i.id)}">Borrar</button>
+    </div>
+  </article>`;
+}
+
+function newIssueDraft(r, existing) {
+  if (existing) {
+    return {
+      kind: 'issue', id: existing.id, isNew: false,
+      title: existing.title, area: existing.area, priority: existing.priority,
+      detectedDate: existing.detectedDate, description: existing.description || '',
+      problemPhotos: (existing.problemPhotoIds || []).map((id) => ({ id, existing: true })),
+      photos: [], materials: [], removedPhotos: [],
+    };
+  }
+  const a = r.params.get('area');
+  return {
+    kind: 'issue', id: uid(), isNew: true,
+    title: '', area: validArea(a) ? a : '', priority: 'media',
+    detectedDate: todayStr(), description: '',
+    problemPhotos: [], photos: [], materials: [], removedPhotos: [],
+  };
+}
+
+function viewIssueForm(r, editId) {
+  let existing = null;
+  if (editId) {
+    existing = issueById(editId);
+    if (!existing) return notFound('Este correctivo ya no existe.');
+  }
+  const key = location.hash;
+  if (!issueDraft || issueDraft.key !== key) {
+    issueDraft = loadStoredDraft(key) || newIssueDraft(r, existing);
+    issueDraft.key = key;
+  }
+  const d = issueDraft;
+  const back = editId ? `#/correctivo/${encodeURIComponent(editId)}` : '#/trabajos';
+  return `
+  ${backLink(back, 'Cancelar')}
+  <h1>${editId ? 'Editar correctivo' : 'Nuevo correctivo'}</h1>
+  <p class="hint">Algo que has visto y hay que arreglar. Cuando lo hagas, márcalo como hecho y apunta el trabajo y el coste.</p>
+  <form id="issue-form" class="form" novalidate>
+    <label>Qué hay que arreglar<input type="text" name="title" value="${esc(d.title)}" placeholder="Por ejemplo: cambiar la polea del pie de palo" maxlength="200" required></label>
+    <label>Área${areaSelect('area', d.area, { extra: d.area ? [] : [] }).replace('<select name="area">', `<select name="area" required><option value="" ${d.area ? '' : 'selected'} disabled>Elige un área</option>`)}</label>
+    <fieldset class="seg prio" role="radiogroup">
+      <legend>Prioridad</legend>
+      ${PRIORITIES.map((p) => `<label><input type="radio" name="priority" value="${p.id}" ${d.priority === p.id ? 'checked' : ''}><span class="${PRIO_CLASS[p.id]}">${esc(p.name)}</span></label>`).join('')}
+    </fieldset>
+    <p class="hint" id="prio-hint">${esc((PRIORITIES.find((p) => p.id === d.priority) || {}).hint || '')}</p>
+    <label>Detectado el<input type="date" name="detectedDate" value="${esc(d.detectedDate)}" max="${todayStr()}" required></label>
+    <label>Descripción <span class="muted">(opcional)</span><textarea name="description" rows="3" placeholder="Qué le pasa, medidas, referencia de la pieza…">${esc(d.description)}</textarea></label>
+    <fieldset>
+      <legend>Fotos <span class="muted">(opcional)</span></legend>
+      <div class="thumbs" id="problem-photos">${draftPhotos(d, 'problemPhotos')}</div>
+      <label class="btn file">${ICON.cam}<span>Añadir foto</span>
+        <input type="file" id="problem-input" class="sr" accept="image/*" multiple></label>
+    </fieldset>
+    <p class="form-error" id="form-error" role="alert" hidden></p>
+    <div class="actions sticky"><button class="btn primary" type="submit">${editId ? 'Guardar cambios' : 'Guardar correctivo'}</button></div>
+  </form>`;
+}
+
+function bindIssueForm() {
+  const form = document.getElementById('issue-form');
+  if (!form) return;
+  const d = issueDraft;
+  form.addEventListener('input', (e) => {
+    const el = e.target;
+    markDirty(d);
+    if (['title', 'detectedDate', 'description', 'area'].includes(el.name)) d[el.name] = el.value;
+  });
+  form.addEventListener('change', async (e) => {
+    const el = e.target;
+    markDirty(d);
+    if (el.name === 'area') d.area = el.value;
+    else if (el.name === 'priority') {
+      d.priority = el.value;
+      document.getElementById('prio-hint').textContent = (PRIORITIES.find((p) => p.id === d.priority) || {}).hint || '';
+    } else await handleCostChange(el, d);
+  });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    guarded(form, saveIssue);
+  });
+  loadDraftPhotos(d);
+}
+
+async function saveIssue() {
+  const d = issueDraft;
+  const err = document.getElementById('form-error');
+  const fail = (m) => { err.textContent = m; err.hidden = false; err.scrollIntoView({ block: 'center', behavior: 'smooth' }); };
+  if (!d.title.trim()) return fail('Escribe qué hay que arreglar.');
+  if (!validArea(d.area)) return fail('Elige el área del barco.');
+  if (!d.detectedDate) return fail('Falta la fecha.');
+  if (d.detectedDate > todayStr()) return fail('La fecha no puede ser futura.');
+  const old = issueById(d.id);
+  if (old?.status === 'hecho' && old.doneDate && d.detectedDate > old.doneDate) return fail('No puede detectarse después de haberse arreglado.');
+  for (const p of d.problemPhotos) {
+    if (!p.existing) await repo.putPhoto({ id: p.id, data: p.data, mime: p.mime, name: p.name || '', interventionId: d.id });
+  }
+  for (const id of d.removedPhotos) await repo.delPhoto(id);
+  const obj = {
+    ...(old || { status: 'pendiente', createdAt: new Date().toISOString() }),
+    id: d.id,
+    title: d.title.trim().slice(0, 200),
+    area: d.area,
+    priority: d.priority,
+    detectedDate: d.detectedDate,
+    description: d.description.trim(),
+    problemPhotoIds: d.problemPhotos.map((p) => p.id),
+  };
+  await repo.put('issues', obj);
+  formSaved(d.key);
+  issueDraft = null;
+  toast(d.isNew ? 'Correctivo apuntado' : 'Cambios guardados');
+  go(d.isNew ? '#/trabajos' : `#/correctivo/${encodeURIComponent(obj.id)}`);
+}
+
+function viewIssueClose(id) {
+  const i = issueById(id);
+  if (!i) return notFound('Este correctivo ya no existe.');
+  const key = location.hash;
+  if (!issueDraft || issueDraft.key !== key) {
+    const stored = loadStoredDraft(key);
+    const done = i.status === 'hecho';
+    const cur = currentHours(repo.state);
+    issueDraft = stored || {
+      kind: 'close', id: i.id, wasDone: done,
+      doneDate: done ? i.doneDate : todayStr(),
+      work: done ? i.work || '' : '',
+      engineHours: done && isNum(i.engineHours) ? String(i.engineHours).replace('.', ',') : '',
+      hoursHint: cur ? cur.hours : null,
+      doneBy: done ? i.doneBy : 'yo',
+      materials: done && (i.materials || []).length ? i.materials.map((m) => ({ desc: m.desc, cost: String(m.cost).replace('.', ',') })) : [{ desc: '', cost: '' }],
+      workshop: done ? i.workshop || '' : '',
+      invoiceTotal: done && isNum(i.invoiceTotal) ? String(i.invoiceTotal).replace('.', ',') : '',
+      photos: done ? (i.photoIds || []).map((pid) => ({ id: pid, existing: true })) : [],
+      problemPhotos: [],
+      removedPhotos: [],
+    };
+    issueDraft.key = key;
+  }
+  const d = issueDraft;
+  return `
+  ${backLink(`#/correctivo/${encodeURIComponent(i.id)}`, 'Cancelar')}
+  <h1>${d.wasDone ? 'Editar trabajo hecho' : 'Marcar como hecho'}</h1>
+  <p class="muted">${esc(i.title)}</p>
+  <form id="close-form" class="form" novalidate>
+    <div class="grid2">
+      <label>Fecha<input type="date" name="doneDate" value="${esc(d.doneDate)}" min="${esc(i.detectedDate)}" max="${todayStr()}" required></label>
+      <label>Horas de motor <span class="muted">(opcional)</span><input type="text" name="engineHours" inputmode="decimal" value="${esc(d.engineHours)}"
+        placeholder="${d.hoursHint != null ? 'Última: ' + esc(d.hoursHint.toLocaleString('es-ES')) : ''}"></label>
+    </div>
+    <label>Trabajo hecho<textarea name="work" rows="3" placeholder="Qué se hizo, piezas cambiadas…">${esc(d.work)}</textarea></label>
+    <fieldset class="seg" role="radiogroup">
+      <legend>¿Quién lo hizo?</legend>
+      <label><input type="radio" name="doneBy" value="yo" ${d.doneBy !== 'taller' ? 'checked' : ''}><span>Yo</span></label>
+      <label><input type="radio" name="doneBy" value="taller" ${d.doneBy === 'taller' ? 'checked' : ''}><span>Taller o profesional</span></label>
+    </fieldset>
+    <div id="cost-block">${costBlock(d)}</div>
+    <p class="form-error" id="form-error" role="alert" hidden></p>
+    <div class="actions sticky"><button class="btn primary" type="submit">${d.wasDone ? 'Guardar cambios' : 'Guardar como hecho'}</button></div>
+  </form>`;
+}
+
+function bindIssueClose() {
+  const form = document.getElementById('close-form');
+  if (!form) return;
+  const d = issueDraft;
+  form.addEventListener('input', (e) => {
+    const el = e.target;
+    markDirty(d);
+    if (['doneDate', 'work', 'engineHours'].includes(el.name)) d[el.name] = el.value;
+    else handleCostInput(el, d);
+  });
+  form.addEventListener('change', async (e) => {
+    markDirty(d);
+    await handleCostChange(e.target, d);
+  });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    guarded(form, saveIssueClose);
+  });
+  loadDraftPhotos(d);
+}
+
+async function saveIssueClose() {
+  const d = issueDraft;
+  const i = issueById(d.id);
+  const err = document.getElementById('form-error');
+  const fail = (m) => { err.textContent = m; err.hidden = false; err.scrollIntoView({ block: 'center', behavior: 'smooth' }); };
+  if (!i) return fail('Este correctivo ya no existe.');
+  if (!d.doneDate) return fail('Falta la fecha.');
+  if (d.doneDate > todayStr()) return fail('La fecha no puede ser futura.');
+  if (d.doneDate < i.detectedDate) return fail(`La fecha no puede ser anterior a cuando se detectó (${fmtDate(i.detectedDate)}).`);
+  const hours = d.engineHours.trim() === '' ? null : parseNum(d.engineHours);
+  if (hours !== null && !(hours >= 0)) return fail('Las horas de motor no son válidas.');
+  if (d.doneBy === 'taller' && d.invoiceTotal.trim() && !(parseNum(d.invoiceTotal) >= 0)) return fail('El total de la factura no es un importe válido.');
+  if (d.doneBy !== 'taller' && d.materials.some((m) => String(m.cost).trim() && !(parseNum(m.cost) >= 0))) return fail('Algún coste de material no es un importe válido.');
+  if (!confirmHours(hours === null ? null : round1(hours), d.doneDate)) return;
+
+  if (d.doneBy === 'taller') {
+    for (const p of d.photos) {
+      if (!p.existing) await repo.putPhoto({ id: p.id, data: p.data, mime: p.mime, name: p.name || '', interventionId: i.id });
+    }
+  } else {
+    for (const p of d.photos) if (p.existing) await repo.delPhoto(p.id);
+  }
+  for (const id of d.removedPhotos) await repo.delPhoto(id);
+
+  await repo.put('issues', {
+    ...i,
+    status: 'hecho',
+    doneDate: d.doneDate,
+    work: d.work.trim(),
+    engineHours: hours === null ? null : round1(hours),
+    doneBy: d.doneBy === 'taller' ? 'taller' : 'yo',
+    materials: d.doneBy !== 'taller' ? d.materials.filter((m) => m.desc.trim() || num(m.cost)).map((m) => ({ desc: m.desc.trim(), cost: num(m.cost) })) : [],
+    workshop: d.doneBy === 'taller' ? d.workshop.trim() : '',
+    invoiceTotal: d.doneBy === 'taller' ? num(d.invoiceTotal) : null,
+    photoIds: d.doneBy === 'taller' ? d.photos.map((p) => p.id) : [],
+  });
+  formSaved(d.key);
+  issueDraft = null;
+  toast(d.wasDone ? 'Cambios guardados' : 'Correctivo hecho');
+  go(`#/correctivo/${encodeURIComponent(i.id)}`);
 }
 
 // ───────────────────────── Service worker ─────────────────────────

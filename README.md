@@ -45,8 +45,9 @@ Los valores de `firebaseConfig` no son secretos: lo que protege tus datos es el 
 - **Bitácora**: cada salida (fechas, puertos, horas de motor al salir y al volver, millas, tripulación, viento y mar, notas y, si echaste, combustible). Las horas que apuntas aquí actualizan el contador.
 - **Repostaje**: combustible en surtidor o con garrafas, aunque no muevas el barco. Cuenta como gasto y, marcando «depósito lleno», calcula el consumo medio del motor (L/h).
 - **Registrar**: fecha, horas, tareas hechas, quién lo hizo. Si lo haces tú, anotas el material; si es un taller, el total y la foto o PDF de la factura. En tareas de caducidad (balsa, bengalas, extintores, ITB…) anota la fecha de la etiqueta.
-- **Historial**: mantenimiento y combustible, con el gasto por año, por sistema y de combustible.
-- **Tareas** (desde Estado o Ajustes): cambia intervalos y avisos, desactiva lo que no lleves o crea tareas nuevas.
+- **Trabajos**: *Correctivos* (cosas que hay que arreglar, con prioridad urgente/alta/media/baja; al hacerlas se apunta el trabajo y el coste) y *Preventivos* (tareas periódicas). Se filtran por área del barco.
+- **Historial**: preventivo, correctivo y combustible, con el gasto por año y por área.
+- **Tareas preventivas** (en Trabajos): cambia intervalos y avisos, desactiva lo que no lleves o crea tareas nuevas.
 - **Ajustes**: exportar al calendario, sincronización, copia de seguridad.
 
 ## 5. Para mantener el proyecto

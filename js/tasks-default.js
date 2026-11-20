@@ -13,18 +13,37 @@
 //
 // Los id son estables: no cambiarlos (las intervenciones los referencian).
 
-export const SYSTEMS = [
+// Áreas del barco: sirven para filtrar preventivos, correctivos y gastos.
+// Los id son estables (las tareas y los correctivos los guardan).
+export const AREAS = [
+  { id: 'casco', name: 'Casco y obra viva' },
+  { id: 'cubierta', name: 'Cubierta y herrajes' },
+  { id: 'jarcia-firme', name: 'Jarcia firme y palo' },
+  { id: 'jarcia-labor', name: 'Jarcia de labor y maniobra' },
+  { id: 'velas', name: 'Velas' },
   { id: 'motor', name: 'Motor' },
   { id: 'transmision', name: 'Transmisión y hélice' },
-  { id: 'casco', name: 'Casco y varada' },
-  { id: 'jarcia', name: 'Jarcia y velas' },
-  { id: 'fondeo', name: 'Fondeo y molinete' },
   { id: 'gobierno', name: 'Gobierno y piloto' },
-  { id: 'electricidad', name: 'Electricidad y energía' },
-  { id: 'confort', name: 'Agua, aseo y confort' },
+  { id: 'fondeo', name: 'Fondeo y molinete' },
+  { id: 'electricidad', name: 'Electricidad y electrónica' },
+  { id: 'agua', name: 'Agua y aseo' },
+  { id: 'confort', name: 'Cocina, gas y calefacción' },
+  { id: 'interior', name: 'Interior' },
   { id: 'seguridad', name: 'Seguridad' },
   { id: 'documentacion', name: 'Documentación' },
   { id: 'otros', name: 'Otros' },
+];
+// Nombre antiguo, por compatibilidad
+export const SYSTEMS = AREAS;
+
+// Versión del reparto de tareas por áreas (para migrar datos guardados)
+export const AREAS_VERSION = 2;
+
+export const PRIORITIES = [
+  { id: 'urgente', name: 'Urgente', hint: 'No salir a navegar sin arreglarlo' },
+  { id: 'alta', name: 'Alta', hint: 'Antes de la próxima salida larga' },
+  { id: 'media', name: 'Media', hint: 'Cuando se pueda' },
+  { id: 'baja', name: 'Baja', hint: 'Mejora o detalle' },
 ];
 
 const t = (id, system, name, intervalHours, intervalMonths, extra = {}) => ({
@@ -104,25 +123,25 @@ export const DEFAULT_TASKS = [
   }),
   t('c-quilla', 'casco', 'Quilla: unión casco–quilla y pernos', null, 24),
   t('c-timon', 'casco', 'Timón: holgura de bocina y cojinetes', null, 24),
-  t('c-sellados', 'casco', 'Sellados de cubierta: herrajes, candeleros y portillos', null, 24),
+  t('c-sellados', 'cubierta', 'Sellados de cubierta: herrajes, candeleros y portillos', null, 24),
   t('c-obra-muerta', 'casco', 'Obra muerta: pulir y encerar', null, 12),
 
-  // ── Jarcia y velas ──────────────────────────────────────────────────
-  t('j-firme-inspeccion', 'jarcia', 'Jarcia firme: inspección (terminales, tensores, crucetas)', null, 12, {
+  // ── Jarcia, maniobra y velas ──────────────────────────────────────────────────
+  t('j-firme-inspeccion', 'jarcia-firme', 'Jarcia firme: inspección (terminales, tensores, crucetas)', null, 12, {
     notes: 'Mejor con subida al palo. Buscar hilos rotos y fisuras en terminales.',
   }),
-  t('j-firme-sustitucion', 'jarcia', 'Jarcia firme: sustitución', null, 120, {
+  t('j-firme-sustitucion', 'jarcia-firme', 'Jarcia firme: sustitución', null, 120, {
     notes: 'Es habitual cambiarla a los 10–12 años; algunas aseguradoras lo exigen. Si la tuya es de 2007, ya ha pasado ese plazo.',
   }),
-  t('j-labor', 'jarcia', 'Jarcia de labor: drizas y escotas', null, 12),
-  t('j-enrollador', 'jarcia', 'Enrollador de génova: limpiar, engrasar y revisar', null, 12),
-  t('j-mayor', 'jarcia', 'Mayor: rizos, sables, garruchos y lazy-bag', null, 12),
-  t('j-velas', 'jarcia', 'Velas: revisión de costuras, puños y banda UV', null, 24),
-  t('j-winches', 'jarcia', 'Winches: desmontar, limpiar y engrasar', null, 12),
-  t('j-poleas', 'jarcia', 'Poleas, mordazas y stoppers', null, 12),
-  t('j-tangon', 'jarcia', 'Tangón de spinnaker: herrajes y pistones', null, 12),
-  t('j-botalon', 'jarcia', 'Botalón de génaker: herrajes y anclaje', null, 12),
-  t('j-spi-genaker', 'jarcia', 'Spinnaker y génaker: velas, calcetín y drizas', null, 24),
+  t('j-labor', 'jarcia-labor', 'Jarcia de labor: drizas y escotas', null, 12),
+  t('j-enrollador', 'jarcia-labor', 'Enrollador de génova: limpiar, engrasar y revisar', null, 12),
+  t('j-mayor', 'velas', 'Mayor: rizos, sables, garruchos y lazy-bag', null, 12),
+  t('j-velas', 'velas', 'Velas: revisión de costuras, puños y banda UV', null, 24),
+  t('j-winches', 'jarcia-labor', 'Winches: desmontar, limpiar y engrasar', null, 12),
+  t('j-poleas', 'jarcia-labor', 'Poleas, mordazas y stoppers', null, 12),
+  t('j-tangon', 'jarcia-labor', 'Tangón de spinnaker: herrajes y pistones', null, 12),
+  t('j-botalon', 'jarcia-labor', 'Botalón de génaker: herrajes y anclaje', null, 12),
+  t('j-spi-genaker', 'velas', 'Spinnaker y génaker: velas, calcetín y drizas', null, 24),
 
   // ── Fondeo y molinete ───────────────────────────────────────────────
   t('f-molinete', 'fondeo', 'Molinete eléctrico: limpiar, engrasar y revisar embrague', null, 12, {
@@ -142,12 +161,12 @@ export const DEFAULT_TASKS = [
   t('e-placas', 'electricidad', 'Placas solares: limpiar, conexiones y regulador', null, 12),
   t('e-puerto', 'electricidad', 'Cargador y toma de puerto: cable y conexiones', null, 12),
 
-  // ── Agua, aseo y confort ────────────────────────────────────────────
-  t('a-inodoro', 'confort', 'Inodoro: bomba, juntas y válvulas', null, 12),
-  t('a-negras', 'confort', 'Depósito de aguas negras: válvulas y respiradero', null, 12),
-  t('a-depositos-agua', 'confort', 'Depósitos de agua dulce: higienizar', null, 12),
-  t('a-bomba-agua', 'confort', 'Bomba y filtro de agua dulce', null, 12),
-  t('a-calentador', 'confort', 'Calentador: válvula de seguridad y conexiones', null, 12, {
+  // ── Agua, aseo, gas y calefacción ────────────────────────────────────────────
+  t('a-inodoro', 'agua', 'Inodoro: bomba, juntas y válvulas', null, 12),
+  t('a-negras', 'agua', 'Depósito de aguas negras: válvulas y respiradero', null, 12),
+  t('a-depositos-agua', 'agua', 'Depósitos de agua dulce: higienizar', null, 12),
+  t('a-bomba-agua', 'agua', 'Bomba y filtro de agua dulce', null, 12),
+  t('a-calentador', 'agua', 'Calentador: válvula de seguridad y conexiones', null, 12, {
     notes: 'Vaciarlo si invernas con riesgo de heladas.',
   }),
   t('a-calefaccion', 'confort', 'Calefacción diésel: revisión (bujía/quemador, escape, toma de aire)', null, 12, {

@@ -8,9 +8,9 @@
 import { FIREBASE_CONFIG } from './config.js';
 import { sanitizeRecord } from './logic.js';
 
-export const COLLECTIONS = ['tasks', 'interventions', 'readings', 'trips', 'fuel', 'meta'];
+export const COLLECTIONS = ['tasks', 'interventions', 'readings', 'trips', 'fuel', 'issues', 'meta'];
 const DB_NAME = 'velero-mantenimiento';
-const DB_VERSION = 2; // v2: trips y fuel
+const DB_VERSION = 3; // v2: trips y fuel; v3: issues (correctivos)
 
 // ───────────────────────── IndexedDB (modo local) ─────────────────────────
 function openIDB() {
@@ -265,7 +265,7 @@ function clean(obj) {
 // ───────────────────────── Repositorio ─────────────────────────
 export class Repo {
   constructor() {
-    this.state = { tasks: [], interventions: [], readings: [], trips: [], fuel: [], meta: [] };
+    this.state = { tasks: [], interventions: [], readings: [], trips: [], fuel: [], issues: [], meta: [] };
     this.listeners = new Set();
     this.backend = null;
     this.sync = { mode: 'local', pending: false, online: navigator.onLine };
