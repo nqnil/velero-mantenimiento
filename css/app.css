@@ -411,6 +411,15 @@ legend { font-weight: 700; padding: 0 6px; display: flex; align-items: center; g
 .donebox h2 { margin-top: 0.8em; }
 .donebox h3 { font-size: 1rem; margin: 1em 0 0.3em; }
 
+@media (max-height: 700px) {
+  .actions.sticky { position: static; }
+}
+
+.urgent {
+  display: block; margin: 6px 0 10px; padding: 12px 14px; border-radius: var(--radius-s);
+  background: var(--red); color: var(--on-status); font-weight: 700; text-decoration: none;
+}
+
 /* Tablet y escritorio: navegación lateral */
 @media (min-width: 900px) {
   body { padding-bottom: 40px; padding-left: 112px; }
@@ -421,7 +430,8 @@ legend { font-weight: 700; padding: 0 6px; display: flex; align-items: center; g
   .tabbar .add svg { margin-top: 0; }
   .actions.sticky { bottom: 0; }
   .toast { bottom: 24px; }
-  .row-due { max-width: 40%; }
+  .row { grid-template-columns: 14px 1fr minmax(0, auto); }
+  .row-due { max-width: 24ch; overflow-wrap: normal; }
 }
 
 @media (max-width: 560px) {

@@ -46,10 +46,14 @@ function settings() {
   return { ...DEFAULT_SETTINGS, ...doc };
 }
 
-function saveSettings(patch) {
+function saveSettings(patch, opts) {
   const cur = repo.state.meta.find((m) => m.id === 'settings') || { id: 'settings' };
-  return repo.put('meta', { ...cur, ...patch, id: 'settings' });
+  return repo.put('meta', { ...cur, ...patch, id: 'settings' }, opts);
 }
+
+// Fecha «muy antigua» para lo que crea la app sola (tareas por defecto, ajustes iniciales):
+// así cualquier dato tuyo, de una copia o de otro dispositivo, gana al fusionar.
+const EPOCH = '1970-01-01T00:00:00.000Z';
 
 function taskById(id) {
   return repo.state.tasks.find((t) => t.id === id);
@@ -197,8 +201,11 @@ let currentHash = '';
 let formDirty = false;
 const DRAFT_PREFIX = 'velero.draft:';
 
+let refocus = null; // selector a enfocar tras repintar (filtros que navegan)
+
 function onHashChange() {
   if (formDirty && location.hash !== currentHash) {
+    document.activeElement?.blur?.();
     if (!confirm('Tienes cambios sin guardar. ¿Salir y descartarlos?')) {
       history.replaceState(null, '', currentHash || '#/');
       return;
@@ -209,10 +216,15 @@ function onHashChange() {
   currentHash = location.hash;
   closeViewer();
   render(true);
-  $view.focus({ preventScroll: true });
+  const f = refocus && document.querySelector(refocus);
+  refocus = null;
+  if (f) f.focus({ preventScroll: true });
+  else $view.focus({ preventScroll: true });
 }
 
 function markDirty(d) {
+  // Eventos tardíos (p. ej. al perder el foco) de un formulario que ya se ha abandonado
+  if (d ? d.key !== location.hash : !FORM_ROUTES.has(formRouteKey(route()))) return;
   formDirty = true;
   if (d) storeDraft(d);
 }
@@ -229,8 +241,13 @@ function storeDraft(d) {
     try {
       sessionStorage.setItem(DRAFT_PREFIX + d.key, JSON.stringify(o));
     } catch {
-      try { // sin espacio: guardar sin las fotos nuevas
-        sessionStorage.setItem(DRAFT_PREFIX + d.key, JSON.stringify({ ...o, photos: (o.photos || []).filter((p) => p.existing) }));
+      try { // sin espacio: guardar el texto sin las fotos nuevas
+        const keep = (list) => (list || []).filter((p) => p.existing);
+        sessionStorage.setItem(DRAFT_PREFIX + d.key, JSON.stringify({ ...o, photos: keep(o.photos), problemPhotos: keep(o.problemPhotos) }));
+        if (!storeDraft.warned) {
+          storeDraft.warned = true;
+          toast('Hay muchas fotos: si la app se recarga antes de guardar, habrá que volver a añadirlas.');
+        }
       } catch { /* nada */ }
     }
   }, 250);
@@ -297,24 +314,36 @@ async function ensureDefaults() {
   const deleted = new Set(s.deletedDefaults || []);
   const have = new Set(repo.state.tasks.map((t) => t.id));
   const missing = DEFAULT_TASKS.filter((t) => !have.has(t.id) && !deleted.has(t.id));
-  for (const t of missing) await repo.put('tasks', { ...t, createdAt: new Date().toISOString() });
-  if (!repo.state.meta.find((m) => m.id === 'settings')) await saveSettings({ areasVersion: AREAS_VERSION });
+  for (const t of missing) await repo.put('tasks', { ...t, createdAt: EPOCH, updatedAt: EPOCH }, { touch: false });
+  if (!repo.state.meta.find((m) => m.id === 'settings')) {
+    await saveSettings({ areasVersion: AREAS_VERSION, createdAt: EPOCH, updatedAt: EPOCH }, { touch: false });
+  }
   await migrateAreas();
 }
 
 // v1.3: las tareas pasan de «sistemas» a «áreas» más finas.
 // Las predefinidas toman su área nueva; las propias con un sistema que ya no existe, la más parecida.
-async function migrateAreas() {
+// Área que tenía cada tarea predefinida antes de v1.3 (solo las que cambiaron)
+const OLD_DEFAULT_AREA = {
+  'c-sellados': 'casco',
+  'j-firme-inspeccion': 'jarcia', 'j-firme-sustitucion': 'jarcia', 'j-labor': 'jarcia', 'j-enrollador': 'jarcia',
+  'j-mayor': 'jarcia', 'j-velas': 'jarcia', 'j-winches': 'jarcia', 'j-poleas': 'jarcia', 'j-tangon': 'jarcia',
+  'j-botalon': 'jarcia', 'j-spi-genaker': 'jarcia',
+  'a-inodoro': 'confort', 'a-negras': 'confort', 'a-depositos-agua': 'confort', 'a-bomba-agua': 'confort', 'a-calentador': 'confort',
+};
+
+async function migrateAreas({ force = false } = {}) {
   const s = settings();
-  if ((s.areasVersion || 1) >= AREAS_VERSION) return;
+  if (!force && (s.areasVersion || 1) >= AREAS_VERSION) return;
   const byId = new Map(DEFAULT_TASKS.map((t) => [t.id, t]));
-  const OLD = { jarcia: 'jarcia-labor' };
   for (const t of repo.state.tasks) {
     const def = t.builtin ? byId.get(t.id) : null;
-    const area = def ? def.system : validArea(t.system) ? t.system : OLD[t.system] || 'otros';
-    if (area !== t.system) await repo.put('tasks', { ...t, system: area });
+    // Solo se mueven las que siguen en su área antigua por defecto: si tú la cambiaste, se respeta
+    if (def && OLD_DEFAULT_AREA[t.id] && t.system === OLD_DEFAULT_AREA[t.id] && t.system !== def.system) {
+      await repo.put('tasks', { ...t, system: def.system }, { touch: false });
+    }
   }
-  await saveSettings({ areasVersion: AREAS_VERSION });
+  if ((s.areasVersion || 1) < AREAS_VERSION) await saveSettings({ areasVersion: AREAS_VERSION }, { touch: false });
 }
 
 let renderQueued = false;
@@ -432,7 +461,11 @@ function viewHome() {
   const list = (arr) => `<ul class="rows">${arr.map(taskRow).join('')}</ul>`;
   const blank = !groups.overdue.length && !groups.soon.length && !groups.ok.length;
 
+  const urgent = repo.state.issues.filter((i) => i.status !== 'hecho' && i.priority === 'urgente');
   return `
+  ${urgent.length ? `<a class="urgent" href="#/trabajos?tipo=correctivos">${urgent.length === 1
+    ? `Correctivo urgente: ${esc(urgent[0].title)}. No salgas sin arreglarlo.`
+    : `${urgent.length} correctivos urgentes. No salgas sin arreglarlos.`}</a>` : ''}
   <section class="meter-card" aria-labelledby="meter-title">
     <div class="meter-head">
       <h1 id="meter-title">${esc(st.boatName)}</h1>
@@ -491,7 +524,7 @@ function pendingIssuesBlock() {
   if (!open.length) return '';
   const shown = open.slice(0, 5);
   return `<section>
-    <h2 class="grp ${open.some((i) => i.priority === 'urgente') ? 'overdue' : 'soon'}">Correctivos pendientes <span class="count">${open.length}</span></h2>
+    <h2 class="grp ${open[0].priority === 'urgente' ? 'overdue' : open[0].priority === 'alta' ? 'soon' : ''}">Correctivos pendientes <span class="count">${open.length}</span></h2>
     <ul class="rows">${shown.map((i) => issueRow(i)).join('')}</ul>
     ${open.length > shown.length ? `<p class="more"><a href="#/trabajos">Ver los ${open.length} correctivos pendientes</a></p>` : ''}
   </section>`;
@@ -633,18 +666,22 @@ function viewHistory(r) {
     (year === 'todo' || e.date.startsWith(year)) &&
     (kind === 'todo' || e.kind === kind) &&
     (!area || e.areas.has(area)));
-  const total = list.reduce((s, e) => s + e.cost, 0);
+  // Un apunte de varias áreas reparte su coste a partes iguales entre ellas,
+  // para que la suma por áreas cuadre con el total.
+  const share = (e) => (area && e.areas.size > 1 ? e.cost / e.areas.size : e.cost);
+  const total = list.reduce((s, e) => s + share(e), 0);
+  const multi = area ? list.filter((e) => e.areas.size > 1) : [];
   const groups = {};
   for (const e of list) {
-    const k = area ? e.kind : e.areas.size === 1 ? [...e.areas][0] : 'varios';
-    groups[k] = (groups[k] || 0) + e.cost;
+    if (area) groups[e.kind] = (groups[e.kind] || 0) + share(e);
+    else for (const a of e.areas) groups[a] = (groups[a] || 0) + e.cost / e.areas.size;
   }
   const rows = Object.entries(groups).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
   const max = Math.max(1, ...rows.map(([, v]) => v));
   const label = (k) => (area ? (HIST_TYPES.find((t) => t.id === k) || {}).name : areaName(k));
   const work = list.filter((e) => e.kind !== 'combustible');
-  const mine = work.filter((e) => e.obj.doneBy !== 'taller').reduce((s, e) => s + e.cost, 0);
-  const shops = work.reduce((s, e) => s + e.cost, 0) - mine;
+  const mine = work.filter((e) => e.obj.doneBy !== 'taller').reduce((s, e) => s + share(e), 0);
+  const shops = work.reduce((s, e) => s + share(e), 0) - mine;
   const fuelList = list.filter((e) => e.kind === 'combustible').map((e) => e.obj);
   const liters = fuelList.reduce((s, f) => s + num(f.liters), 0);
   const cons = fuelConsumption(repo.state.fuel);
@@ -671,6 +708,7 @@ function viewHistory(r) {
   </form>
   <section class="spend">
     <p class="spend-total"><span class="money big">${fmtMoney(total)}</span> en ${count} ${count === 1 ? 'apunte' : 'apuntes'}${year === 'todo' ? '' : ` en ${esc(year)}`}${area ? `, ${esc(areaName(area).toLowerCase())}` : ''}</p>
+    ${multi.length ? `<p class="hint">Incluye ${multi.length} ${multi.length === 1 ? 'apunte' : 'apuntes'} de varias áreas: aquí cuenta la parte proporcional de su coste.</p>` : ''}
     ${work.length ? `<p class="muted">Trabajos: material propio ${fmtMoney(mine)}, talleres ${fmtMoney(shops)}.</p>` : ''}
     ${fuelList.length ? `<p class="muted">Combustible: ${fmtNum(liters)} L${pplText(fuelList)}.${cons ? ` Consumo medio del motor: ${fmtNum(cons.lph, 2)} L/h.` : ''}</p>` : ''}
     ${rows.length > 1 ? `<ul class="bars">${rows.map(([k, v]) => `
@@ -744,7 +782,7 @@ async function loadThumbs() {
   for (const b of btns) {
     const p = await repo.getPhoto(b.dataset.id);
     if (!b.isConnected) return;
-    if (!p) { b.innerHTML = '<span class="ph-loading">No disponible sin conexión</span>'; continue; }
+    if (!p) { b.innerHTML = `<span class="ph-loading">${navigator.onLine ? 'No disponible' : 'No disponible sin conexión'}</span>`; continue; }
     photoCache.set(p.id, p);
     if (p.mime === 'application/pdf') {
       // Enlace de verdad: en iPhone, abrir un PDF tras una espera lo bloquea el navegador
@@ -963,6 +1001,7 @@ function handleCostInput(el, d) {
 async function handleCostChange(el, d) {
   if (el.name === 'doneBy') {
     d.doneBy = el.value;
+    if (d.doneBy !== 'taller' && !d.materials.length) d.materials.push({ desc: '', cost: '' });
     document.getElementById('cost-block').innerHTML = costBlock(d);
     loadDraftPhotos(d);
     return true;
@@ -1219,6 +1258,7 @@ function viewHours() {
       isNum(t.hoursStart) ? { id: t.id, date: t.date, hours: t.hoursStart, kind: 'otro', title: `Salida: ${tripRoute(t)}`, href: `#/navegacion/${encodeURIComponent(t.id)}` } : null,
       isNum(t.hoursEnd) ? { id: t.id, date: t.endDate || t.date, hours: t.hoursEnd, kind: 'otro', title: `Llegada: ${tripRoute(t)}`, href: `#/navegacion/${encodeURIComponent(t.id)}` } : null,
     ].filter(Boolean)),
+    ...repo.state.issues.filter((i) => i.status === 'hecho' && isNum(i.engineHours)).map((i) => ({ id: i.id, date: i.doneDate, hours: i.engineHours, kind: 'otro', title: `Correctivo: ${i.title}`, href: `#/correctivo/${encodeURIComponent(i.id)}` })),
     ...repo.state.fuel.filter((f) => isNum(f.engineHours) && !f.tripId).map((f) => ({ id: f.id, date: f.date, hours: f.engineHours, kind: 'otro', title: 'Repostaje', href: `#/repostaje/${encodeURIComponent(f.id)}` })),
   ].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.hours - a.hours));
   const rate = usageRate(repo.state);
@@ -1383,12 +1423,12 @@ function authError(err) {
 
 async function switchToCloud(user) {
   const local = await readLocalDump();
-  const hasLocal = local.interventions.length || local.readings.length || local.trips.length || local.fuel.length;
+  const hasLocal = local.interventions.length || local.readings.length || local.trips.length || local.fuel.length || local.issues.length;
   localStorage.setItem('velero.mode', 'cloud');
   seededCloud = false;
   await repo.useCloud(user);
   if (hasLocal) {
-    const ok = confirm(`Este dispositivo tiene datos guardados sin cuenta (${local.interventions.length} intervenciones, ${local.trips.length} navegaciones, ${local.fuel.length} repostajes y ${local.readings.length} lecturas). ¿Subirlos a tu cuenta? Si algo ya está en la cuenta, se conserva la versión más reciente.`);
+    const ok = confirm(`Este dispositivo tiene datos guardados sin cuenta (${local.interventions.length} intervenciones, ${local.issues.length} correctivos, ${local.trips.length} navegaciones, ${local.fuel.length} repostajes y ${local.readings.length} lecturas). ¿Subirlos a tu cuenta? Si algo ya está en la cuenta, se conserva la versión más reciente.`);
     if (ok) {
       await waitServer(10000);
       const res = await mergeData(local);
@@ -1420,6 +1460,7 @@ async function mergeData(data) {
     for (const raw of rows) {
       const rec = sanitizeRecord(c, raw);
       if (!rec) { skipped++; continue; }
+      if (c === 'meta') { if (await mergeSettings(rec)) written++; continue; }
       const cur = repo.state[c].find((x) => x.id === rec.id);
       if (cur && (cur.updatedAt || '') >= (rec.updatedAt || '')) continue;
       await repo.put(c, rec, { touch: false });
@@ -1431,7 +1472,31 @@ async function mergeData(data) {
     if (!ph) { skipped++; continue; }
     await repo.putPhoto(ph);
   }
+  // Tareas predefinidas que se habían borrado, y áreas de versiones antiguas
+  for (const id of settings().deletedDefaults || []) {
+    const t = taskById(id);
+    if (t?.builtin) await repo.del('tasks', id);
+  }
+  await migrateAreas({ force: true });
   return { written, skipped };
+}
+
+// Ajustes: campo a campo (gana el más reciente o el que falte) y las tareas borradas se suman
+async function mergeSettings(rec) {
+  const cur = repo.state.meta.find((m) => m.id === 'settings') || { id: 'settings' };
+  const newer = (rec.updatedAt || '') > (cur.updatedAt || '');
+  const out = { ...cur };
+  let changed = false;
+  for (const k of ['boatName', 'boatModel', 'engine', 'noticeHours', 'noticeDays']) {
+    if (rec[k] === undefined) continue;
+    if ((cur[k] === undefined || newer) && cur[k] !== rec[k]) { out[k] = rec[k]; changed = true; }
+  }
+  const del = [...new Set([...(cur.deletedDefaults || []), ...(rec.deletedDefaults || [])])];
+  if (del.length !== (cur.deletedDefaults || []).length) { out.deletedDefaults = del; changed = true; }
+  if (!changed) return false;
+  if (newer) out.updatedAt = rec.updatedAt;
+  await repo.put('meta', out, { touch: !newer });
+  return true;
 }
 
 // ───────────────────────── Exportaciones ─────────────────────────
@@ -1470,7 +1535,7 @@ async function exportJSON() {
     meta: repo.state.meta,
     photos,
   };
-  if (missing) toast(`Atención: ${missing} ${missing === 1 ? 'factura no está' : 'facturas no están'} en este dispositivo y no van en la copia. Hazla con conexión.`);
+  if (missing) toast(`Atención: ${missing} ${missing === 1 ? 'foto o factura no está' : 'fotos o facturas no están'} en este dispositivo y no van en la copia. Hazla con conexión.`);
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   await shareOrDownload(blob, `velero-copia-${todayStr()}.json`, 'Copia de seguridad del velero');
 }
@@ -1485,7 +1550,7 @@ async function importBackup(file) {
   }
   if (!data || typeof data !== 'object' || data.app !== 'velero-mantenimiento') { toast('Ese archivo no es una copia de esta app.'); return; }
   const len = (k) => (Array.isArray(data[k]) ? data[k].length : 0);
-  if (!confirm(`La copia tiene ${len('interventions')} intervenciones, ${len('trips')} navegaciones y ${len('fuel')} repostajes. Se añadirá lo que falte y se actualizará lo que en la copia sea más reciente. ¿Continuar?`)) return;
+  if (!confirm(`La copia tiene ${len('interventions')} intervenciones, ${len('issues')} correctivos, ${len('trips')} navegaciones y ${len('fuel')} repostajes. Se añadirá lo que falte y se actualizará lo que en la copia sea más reciente. ¿Continuar?`)) return;
   toast('Importando…');
   try {
     const res = await mergeData(data);
@@ -1568,6 +1633,7 @@ function bindView(key) {
   } else if (key === 'trabajos' || key === 'tareas') {
     const f = document.getElementById('area-filter');
     f?.addEventListener('change', (e) => {
+      refocus = '#area-filter select';
       const tipo = key === 'tareas' ? 'preventivos' : f.dataset.tipo;
       location.hash = `#/trabajos?tipo=${tipo}${e.target.value ? `&area=${encodeURIComponent(e.target.value)}` : ''}`;
     });
@@ -1575,6 +1641,7 @@ function bindView(key) {
   } else if (key === 'historial') {
     const f = document.getElementById('hist-area');
     f?.addEventListener('change', (e) => {
+      refocus = '#hist-area select';
       const v = e.target.value;
       location.hash = `#/historial?tipo=${encodeURIComponent(f.dataset.tipo)}&anio=${encodeURIComponent(f.dataset.anio)}${v ? `&area=${encodeURIComponent(v)}` : ''}`;
     });
@@ -1735,8 +1802,8 @@ function openPhoto(p) {
   v.id = 'viewer';
   v.className = 'viewer';
   v.setAttribute('role', 'dialog');
-  v.setAttribute('aria-label', 'Factura');
-  v.innerHTML = `<button class="btn" data-action="close-viewer">Cerrar</button><img src="${esc(p.data)}" alt="Factura">`;
+  v.setAttribute('aria-label', 'Foto');
+  v.innerHTML = `<button class="btn" data-action="close-viewer">Cerrar</button><img src="${esc(p.data)}" alt="Foto">`;
   document.body.appendChild(v);
   v.querySelector('button').focus();
 }
@@ -2280,7 +2347,7 @@ function viewWork(r, forced) {
   const tipo = tipoParam === 'preventivos' ? 'preventivos' : 'correctivos';
   const areaParam = r.params.get('area') || '';
   const area = validArea(areaParam) ? areaParam : '';
-  const pending = repo.state.issues.filter((i) => i.status !== 'hecho');
+  const pending = repo.state.issues.filter((i) => i.status !== 'hecho' && (!area || i.area === area));
   const head = `
   <div class="titlebar"><h1>Trabajos</h1>
     ${tipo === 'correctivos'
@@ -2303,7 +2370,7 @@ function viewWork(r, forced) {
     .sort((a, b) => (a.doneDate < b.doneDate ? 1 : -1));
   if (!repo.state.issues.length) {
     return head + `<section class="notice"><p>Aquí van las cosas que encuentras y hay que arreglar: una polea rota, una vía de agua, un winch que patina… Apúntalas con su prioridad y márcalas como hechas cuando las arregles, con el trabajo y el coste.</p>
-    <a class="btn primary" href="#/correctivo/nuevo">Apuntar un correctivo</a></section>`;
+    <a class="btn primary" href="#/correctivo/nuevo${area ? `?area=${encodeURIComponent(area)}` : ''}">Apuntar un correctivo</a></section>`;
   }
   return head + `
   <section>
@@ -2486,7 +2553,7 @@ async function saveIssue() {
   formSaved(d.key);
   issueDraft = null;
   toast(d.isNew ? 'Correctivo apuntado' : 'Cambios guardados');
-  go(d.isNew ? '#/trabajos' : `#/correctivo/${encodeURIComponent(obj.id)}`);
+  go(d.isNew ? `#/trabajos?tipo=correctivos&area=${encodeURIComponent(obj.area)}` : `#/correctivo/${encodeURIComponent(obj.id)}`);
 }
 
 function viewIssueClose(id) {

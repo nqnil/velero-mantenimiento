@@ -1,6 +1,8 @@
 // Cálculo de vencimientos, horas de motor y exportación a calendario.
 // Funciones puras: no tocan el DOM ni el almacenamiento.
 
+import { AREAS, DEFAULT_TASKS } from './tasks-default.js';
+
 export const DAY_MS = 86400000;
 
 // ── Fechas (siempre como 'YYYY-MM-DD', en hora local) ────────────────
@@ -400,7 +402,20 @@ export function fmtHours(n) {
 // ── Validación de registros (copias importadas, datos de la nube) ───
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const PHOTO_RE = /^data:(image\/jpeg|image\/png|application\/pdf);base64,[A-Za-z0-9+/=]+$/;
-const isDate = (v) => typeof v === 'string' && DATE_RE.test(v) && !Number.isNaN(parseDate(v).getTime());
+// Fecha real (rechaza 2026-02-30, que el calendario convertiría en otro día)
+const isDate = (v) => typeof v === 'string' && DATE_RE.test(v) && todayStr(parseDate(v)) === v;
+// Fecha de algo ya ocurrido (margen de un día por husos horarios)
+const isPast = (v) => isDate(v) && v <= addDays(todayStr(), 1);
+
+// Áreas: las de versiones antiguas o desconocidas se llevan a la actual más parecida
+const AREA_IDS = new Set(AREAS.map((a) => a.id));
+const OLD_AREAS = { jarcia: 'jarcia-labor' };
+const DEFAULT_AREA = new Map(DEFAULT_TASKS.map((t) => [t.id, t.system]));
+export function normArea(v, taskId) {
+  if (typeof v === 'string' && AREA_IDS.has(v)) return v;
+  if (taskId && DEFAULT_AREA.has(taskId)) return DEFAULT_AREA.get(taskId);
+  return OLD_AREAS[v] || 'otros';
+}
 const str = (v, max = 5000) => (typeof v === 'string' ? v.slice(0, max) : '');
 const optNum = (v) => (isNum(v) && v >= 0 && v < 1e7 ? v : null);
 const optDate = (v) => (isDate(v) ? v : '');
@@ -408,7 +423,8 @@ const optDate = (v) => (isDate(v) ? v : '');
 /** Devuelve una copia limpia del registro, o null si no es aprovechable. */
 export function sanitizeRecord(col, o) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
-  if (typeof o.id !== 'string' || !o.id || o.id.length > 200) return null;
+  // Ids que Firestore no admite (con «/», o del tipo __x__) se descartan
+  if (typeof o.id !== 'string' || !o.id || o.id.length > 200 || o.id.includes('/') || /^__.*__$/.test(o.id) || o.id === '.' || o.id === '..') return null;
   const base = { id: o.id, createdAt: str(o.createdAt, 40), updatedAt: str(o.updatedAt, 40) };
   switch (col) {
     case 'tasks': {
@@ -416,7 +432,7 @@ export function sanitizeRecord(col, o) {
       return {
         ...base,
         name: str(o.name, 200),
-        system: str(o.system, 40) || 'otros',
+        system: normArea(o.system, o.builtin ? o.id : null),
         type: o.type === 'caducidad' ? 'caducidad' : 'intervalo',
         intervalHours: optNum(o.intervalHours) || null,
         intervalMonths: optNum(o.intervalMonths) || null,
@@ -428,7 +444,7 @@ export function sanitizeRecord(col, o) {
       };
     }
     case 'interventions': {
-      if (!isDate(o.date)) return null;
+      if (!isPast(o.date)) return null;
       const expiries = {};
       if (o.expiries && typeof o.expiries === 'object') {
         for (const [k, v] of Object.entries(o.expiries)) if (typeof k === 'string' && isDate(v)) expiries[k] = v;
@@ -451,15 +467,17 @@ export function sanitizeRecord(col, o) {
       };
     }
     case 'issues': {
-      if (!str(o.title).trim() || !isDate(o.detectedDate)) return null;
-      const done = o.status === 'hecho' && isDate(o.doneDate);
+      if (!str(o.title).trim() || !isPast(o.detectedDate)) return null;
+      const done = o.status === 'hecho' && isPast(o.doneDate);
+      // Si se arregló «antes» de detectarse, la detección pasa a ese día
+      const detected = done && o.doneDate < o.detectedDate ? o.doneDate : o.detectedDate;
       return {
         ...base,
         title: str(o.title, 200),
-        area: str(o.area, 40) || 'otros',
+        area: normArea(o.area),
         priority: ['urgente', 'alta', 'media', 'baja'].includes(o.priority) ? o.priority : 'media',
         description: str(o.description),
-        detectedDate: o.detectedDate,
+        detectedDate: detected,
         problemPhotoIds: Array.isArray(o.problemPhotoIds) ? o.problemPhotoIds.filter((x) => typeof x === 'string') : [],
         status: done ? 'hecho' : 'pendiente',
         doneDate: done ? o.doneDate : '',
@@ -475,10 +493,10 @@ export function sanitizeRecord(col, o) {
       };
     }
     case 'readings':
-      if (!isDate(o.date) || optNum(o.hours) === null) return null;
+      if (!isPast(o.date) || optNum(o.hours) === null) return null;
       return { ...base, date: o.date, hours: o.hours };
     case 'trips': {
-      if (!isDate(o.date)) return null;
+      if (!isPast(o.date)) return null;
       const end = optDate(o.endDate);
       return {
         ...base,
@@ -496,7 +514,7 @@ export function sanitizeRecord(col, o) {
       };
     }
     case 'fuel':
-      if (!isDate(o.date)) return null;
+      if (!isPast(o.date)) return null;
       return {
         ...base,
         date: o.date,
