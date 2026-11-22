@@ -387,6 +387,9 @@ export function num(v) {
 export function round1(n) {
   return Math.round(n * 10) / 10;
 }
+export function round2(n) {
+  return Math.round(n * 100) / 100;
+}
 export function fmtDate(s, opts) {
   if (!s) return '';
   return parseDate(s).toLocaleDateString('es-ES', opts || { day: 'numeric', month: 'short', year: 'numeric' });
