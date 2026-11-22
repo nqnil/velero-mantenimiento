@@ -1,6 +1,6 @@
 // Piezas de HTML que se repiten en varias pantallas.
 
-import { esc, ICON, fmtNum } from './core.js';
+import { esc, ICON } from './core.js';
 import { num, fmtDate, fmtMoney } from './logic.js';
 
 export function backLink(href, label) {
@@ -84,7 +84,7 @@ export function formEnd(label) {
 }
 
 export function deleteButton(action, id, label = 'Borrar') {
-  return `<button class="btn danger" data-action="${esc(action)}" data-id="${esc(id)}">${esc(label)}</button>`;
+  return `<button type="button" class="btn danger" data-action="${esc(action)}" data-id="${esc(id)}">${esc(label)}</button>`;
 }
 
 export function bars(rows, label, fuelKey = 'combustible') {
@@ -96,4 +96,13 @@ export function bars(rows, label, fuelKey = 'combustible') {
     <span class="money">${fmtMoney(v)}</span></li>`).join('')}</ul>`;
 }
 
-export const plural = (n, one, many) => `${fmtNum(n, 0)} ${n === 1 ? one : many}`;
+// Filtro de área que navega al cambiar. url(form, valor) da el destino; onNavigate permite
+// recuperar el foco en el desplegable tras repintar (accesible con teclado).
+export function bindAreaFilter(formId, url, onNavigate) {
+  const f = document.getElementById(formId);
+  f?.addEventListener('change', (e) => {
+    onNavigate?.(`#${formId} select`);
+    location.hash = url(f, e.target.value);
+  });
+  f?.addEventListener('submit', (e) => e.preventDefault());
+}

@@ -100,7 +100,7 @@ export function routeFormKey(r) {
 
 // ───────────────────────── Validación y guardado ─────────────────────────
 // Un error de formulario: se muestra junto al botón de guardar.
-export class FormError extends Error {}
+class FormError extends Error {}
 export function check(cond, msg) {
   if (!cond) throw new FormError(msg);
 }
@@ -113,6 +113,7 @@ export function dateRequired(v, label = 'la fecha') {
 
 // '' → null; número ≥ 0 → número; otra cosa → error con el mensaje dado
 export function optNumber(v, msg) {
+  if (typeof v === 'number') { check(v >= 0, msg); return v; } // ya leído
   const s = String(v ?? '').trim();
   if (!s) return null;
   const n = parseNum(s);
@@ -131,7 +132,11 @@ export async function guarded(form, fn) {
   try {
     await fn();
   } catch (e) {
-    if (!(e instanceof FormError)) throw e;
+    if (!(e instanceof FormError)) {
+      console.error(e);
+      toast(`No se ha podido guardar: ${e.message || e}`);
+      return;
+    }
     if (err) {
       err.textContent = e.message;
       err.hidden = false;
@@ -187,7 +192,7 @@ export function bindPlainForm(id, save) {
 
 // ───────────────────────── Horas de motor ─────────────────────────
 // Comprueba que unas horas encajan con las lecturas de alrededor. Devuelve un aviso o null.
-export function hoursWarning(hours, date) {
+function hoursWarning(hours, date) {
   let before = null, after = null;
   for (const p of hourPoints(repo.state)) {
     if (p.date <= date) before = p;
@@ -202,7 +207,7 @@ export function hoursWarning(hours, date) {
   return null;
 }
 
-export function confirmHours(hours, date) {
+function confirmHours(hours, date) {
   if (hours === null) return true;
   const w = hoursWarning(hours, date);
   return !w || confirm(`${w} ¿Guardar ${fmtHours(hours)} igualmente?`);
@@ -234,7 +239,8 @@ export function costDraft(rec) {
     materials: mats,
     workshop: shop ? rec.workshop || '' : '',
     invoiceTotal: shop ? fmtInput(rec.invoiceTotal) : '',
-    photos: shop ? (rec.photoIds || []).map((id) => ({ id, existing: true })) : [],
+    // Se cargan siempre: si no es de taller y tuviera fotos, savePhotos las borra
+    photos: (rec?.photoIds || []).map((id) => ({ id, existing: true })),
     removedPhotos: [],
   };
 }
@@ -248,7 +254,7 @@ export function doneBySeg(d) {
   <div id="cost-block">${costBlock(d)}</div>`;
 }
 
-export function costBlock(d) {
+function costBlock(d) {
   if (d.doneBy === 'taller') {
     return `<fieldset><legend>Factura</legend>
       <div class="grid2">
@@ -373,7 +379,7 @@ async function handleCostChange(el, d) {
     }
   }
   refreshPhotos(d, list);
-  markDirty(d);
+  markDirty(d); // vuelve a guardar el borrador, ya con las fotos
   return true;
 }
 
@@ -404,7 +410,7 @@ export const formActions = {
   },
 };
 
-export async function fileToPhoto(file) {
+async function fileToPhoto(file) {
   const id = uid();
   if (file.type === 'application/pdf') {
     const data = await readAsDataURL(file);

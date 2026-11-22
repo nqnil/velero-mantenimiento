@@ -19,7 +19,7 @@ function entries() {
     ...repo.state.interventions.map((i) => ({ kind: 'preventivo', date: i.date, obj: i, cost: interventionCost(i), areas: interventionAreas(i), row: interventionLogRow })),
     ...repo.state.issues.filter((i) => i.status === 'hecho').map((i) => ({ kind: 'correctivo', date: i.doneDate, obj: i, cost: issueCost(i), areas: new Set([i.area]), row: issueLogRow })),
     ...repo.state.fuel.map((f) => ({ kind: 'combustible', date: f.date, obj: f, cost: fuelCost(f), areas: new Set(['combustible']), row: fuelLogRow })),
-  ].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  ].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)); // estable: el orden de alta no importa aquí
 }
 
 export function viewHistory(r) {

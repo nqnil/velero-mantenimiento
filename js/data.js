@@ -28,7 +28,7 @@ const OLD_DEFAULT_AREA = {
   'a-inodoro': 'confort', 'a-negras': 'confort', 'a-depositos-agua': 'confort', 'a-bomba-agua': 'confort', 'a-calentador': 'confort',
 };
 
-export async function migrateAreas({ force = false } = {}) {
+async function migrateAreas({ force = false } = {}) {
   const version = settings().areasVersion || 1;
   if (!force && version >= AREAS_VERSION) return;
   const byId = new Map(DEFAULT_TASKS.map((t) => [t.id, t]));

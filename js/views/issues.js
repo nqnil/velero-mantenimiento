@@ -3,7 +3,7 @@
 import { AREAS, PRIORITIES } from '../tasks-default.js';
 import {
   repo, esc, toast, go, render, idPath, link, issueById, now, deletePhotos, settings,
-  areaName, validArea, areaSelect, priority, PRIO_CLASS, capitalize, ICON, fmtInput, doneByText,
+  areaName, validArea, areaSelect, byDesc, priority, PRIO_CLASS, capitalize, ICON, fmtInput, doneByText,
 } from '../core.js';
 import { todayStr, issueCost, sortIssues, allStatuses, isNum, fmtDate, fmtMoney, fmtHours } from '../logic.js';
 import { uid } from '../store.js';
@@ -67,7 +67,7 @@ export function viewWork(r, forced) {
     return head + `<section class="notice"><p>Aquí van las cosas que encuentras y hay que arreglar: una polea rota, una vía de agua, un winch que patina… Apúntalas con su prioridad y márcalas como hechas cuando las arregles, con el trabajo y el coste.</p>
     <a class="btn primary" href="${esc(link('correctivo/nuevo', { area }))}">Apuntar un correctivo</a></section>`;
   }
-  const done = repo.state.issues.filter((i) => isDone(i) && inArea(i)).sort((a, b) => (a.doneDate < b.doneDate ? 1 : -1));
+  const done = repo.state.issues.filter((i) => isDone(i) && inArea(i)).sort(byDesc('doneDate'));
   const rows = (list) => `<ul class="rows">${list.map((i) => issueRow(i, { showArea: !area })).join('')}</ul>`;
   return head + `
   <section>
@@ -91,16 +91,6 @@ function preventiveList(area) {
       <h2>${esc(a.name)}</h2>
       <ul class="rows">${byArea[a.id].sort((x, y) => x.task.name.localeCompare(y.task.name, 'es')).map((s) => taskRow(s, { detail: true })).join('')}</ul>
     </section>`).join('')}`;
-}
-
-// El filtro de área navega al cambiar (y conserva el foco en el desplegable)
-export function bindAreaFilter(formId, url, setRefocus) {
-  const f = document.getElementById(formId);
-  f?.addEventListener('change', (e) => {
-    setRefocus(`#${formId} select`);
-    location.hash = url(f, e.target.value);
-  });
-  f?.addEventListener('submit', (e) => e.preventDefault());
 }
 
 // ───────────────────────── Ver correctivo ─────────────────────────
@@ -291,7 +281,7 @@ export const actions = {
     const i = issueById(el.dataset.id);
     if (!i || !confirm('¿Volver a ponerlo como pendiente? Se borrará el trabajo apuntado, su coste y la factura.')) return;
     await deletePhotos(i.photoIds);
-    await repo.put('issues', { ...i, status: 'pendiente', doneDate: '', work: '', engineHours: null, doneBy: 'yo', materials: [], workshop: '', invoiceTotal: null, photoIds: [] });
+    await repo.put('issues', { ...i, status: 'pendiente', doneDate: '', work: '', engineHours: null, ...costRecord(costDraft(null)) });
     toast('Vuelve a estar pendiente');
     render(true);
   },

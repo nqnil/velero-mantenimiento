@@ -2,7 +2,7 @@
 
 import { AREAS } from '../tasks-default.js';
 import {
-  repo, esc, toast, go, render, route, idPath, settings, saveSettings, taskById, find, now, deletePhotos, ICON,
+  repo, esc, toast, go, render, route, idPath, settings, saveSettings, taskById, find, now, deletePhotos, ICON, byDateDesc,
   areaName, validArea, areaSelect, intervalText, relDays, dueText, STATUS_LABEL, LONG_DATE, fmtInput, doneByText,
 } from '../core.js';
 import {
@@ -22,7 +22,7 @@ import { tripRoute } from './logbook.js';
 // ───────────────────────── Textos de intervenciones ─────────────────────────
 const taskNames = (i) => (i.taskIds || []).map((id) => taskById(id)?.name).filter(Boolean);
 
-export function interventionTitle(i) {
+function interventionTitle(i) {
   const names = taskNames(i);
   if (i.title) return names.length ? `${i.title}: ${names.join(', ')}` : i.title;
   return names.join(', ') || 'Intervención';
@@ -68,7 +68,7 @@ export function viewTask(id) {
   if (!t) return notFound('Esta tarea ya no existe.');
   const st = settings();
   const s = taskStatus(t, repo.state, st);
-  const hist = repo.state.interventions.filter((i) => (i.taskIds || []).includes(t.id)).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const hist = repo.state.interventions.filter((i) => (i.taskIds || []).includes(t.id)).sort(byDateDesc);
   const hoursLeft = s.hoursLeft !== null ? `, ${s.hoursLeft > 0 ? 'faltan ' + fmtHours(s.hoursLeft) : 'pasada ' + fmtHours(-s.hoursLeft)}` : '';
   return `
   ${backLink('#/', 'Estado')}

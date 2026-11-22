@@ -108,7 +108,7 @@ export const STATUS_LABEL = {
   inactive: 'Desactivada',
 };
 
-export function monthsText(m) {
+function monthsText(m) {
   if (m % 12 === 0) return m === 12 ? '1 año' : `${m / 12} años`;
   return m === 1 ? '1 mes' : `${m} meses`;
 }
@@ -131,7 +131,7 @@ export function relDays(d) {
 }
 
 export const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-export const SHORT_DATE = { day: 'numeric', month: 'short' };
+const SHORT_DATE = { day: 'numeric', month: 'short' };
 export const LONG_DATE = { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' };
 
 export function dueText(s) {
@@ -162,8 +162,9 @@ export function fmtInput(n) {
   return isNum(n) ? String(Math.round(n * 100) / 100).replace('.', ',') : '';
 }
 
-export function byDateDesc(a, b) {
-  return a.date < b.date ? 1 : a.date > b.date ? -1 : (b.createdAt || '').localeCompare(a.createdAt || '');
-}
+// Orden de más reciente a más antiguo por un campo de fecha (y, a igual fecha, por alta)
+export const byDesc = (k = 'date') => (a, b) =>
+  (a[k] || '') < (b[k] || '') ? 1 : (a[k] || '') > (b[k] || '') ? -1 : (b.createdAt || '').localeCompare(a.createdAt || '');
+export const byDateDesc = byDesc('date');
 
 export const doneByText = (r, me = 'Yo mismo') => (r.doneBy === 'taller' ? r.workshop || 'Taller' : me);

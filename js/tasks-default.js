@@ -33,8 +33,6 @@ export const AREAS = [
   { id: 'documentacion', name: 'Documentación' },
   { id: 'otros', name: 'Otros' },
 ];
-// Nombre antiguo, por compatibilidad
-export const SYSTEMS = AREAS;
 
 // Versión del reparto de tareas por áreas (para migrar datos guardados)
 export const AREAS_VERSION = 2;

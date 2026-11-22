@@ -11,7 +11,8 @@ import {
   viewTask, viewTaskEdit, bindTaskForm, viewRegister, bindRegister, viewIntervention, viewHours, bindHours,
   actions as maintenanceActions,
 } from './views/maintenance.js';
-import { viewWork, bindAreaFilter, viewIssue, viewIssueForm, bindIssueForm, viewIssueClose, bindIssueClose, actions as issueActions } from './views/issues.js';
+import { bindAreaFilter } from './ui.js';
+import { viewWork, viewIssue, viewIssueForm, bindIssueForm, viewIssueClose, bindIssueClose, actions as issueActions } from './views/issues.js';
 import { viewLogbook, viewTrip, viewTripForm, bindTripForm, viewFuel, viewFuelForm, bindFuelForm, actions as logbookActions } from './views/logbook.js';
 import { viewHistory } from './views/history.js';
 import { viewSettings, bindSettings, setSyncListener, actions as settingsActions } from './views/settings.js';
@@ -63,7 +64,8 @@ let lastRoute = '';
 
 function render(force) {
   const r = route();
-  const def = ROUTES[routeFormKey(r)] || ROUTES[''];
+  const key = routeFormKey(r);
+  const def = (Object.hasOwn(ROUTES, key) && ROUTES[key]) || ROUTES[''];
   // Las pantallas con formulario no se repintan solas, para no perder lo que escribes.
   if (!force && def.form) return;
   forgetOtherDrafts();
@@ -134,7 +136,7 @@ function checkCloudSeed() {
 }
 
 setSyncListener((mode) => {
-  if (mode === 'cloud') seededCloud = false;
+  if (mode === 'before-cloud') { seededCloud = false; return; }
   updateSyncBadge();
   checkCloudSeed();
 });

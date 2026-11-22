@@ -127,8 +127,8 @@ function placesDatalist() {
 
 function fuelFields(f, method = 'surtidor') {
   return {
-    liters: f && num(f.liters) ? fmtInput(f.liters) : '',
-    total: f && num(f.total) ? fmtInput(f.total) : '',
+    liters: fmtInput(num(f?.liters) || null),
+    total: fmtInput(num(f?.total) || null),
     place: f?.place || '',
     method: f?.method || method,
     fullTank: f ? !!f.fullTank : true,

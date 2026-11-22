@@ -145,6 +145,7 @@ async function switchToCloud(user) {
   const n = (k) => local[k].length;
   const hasLocal = n('interventions') || n('readings') || n('trips') || n('fuel') || n('issues');
   localStorage.setItem('velero.mode', 'cloud');
+  onSync('before-cloud'); // las tareas por defecto se crearán cuando confirme el servidor
   await repo.useCloud(user);
   onSync('cloud');
   if (hasLocal && confirm(`Este dispositivo tiene datos guardados sin cuenta (${n('interventions')} intervenciones, ${n('issues')} correctivos, ${n('trips')} navegaciones, ${n('fuel')} repostajes y ${n('readings')} lecturas). ¿Subirlos a tu cuenta? Si algo ya está en la cuenta, se conserva la versión más reciente.`)) {
