@@ -2,13 +2,13 @@
 
 import { AREAS, PRIORITIES } from '../tasks-default.js';
 import {
-  repo, esc, toast, go, render, idPath, link, issueById, now, deletePhotos, settings,
+  repo, esc, toast, render, idPath, link, issueById, now, deletePhotos, settings,
   areaName, validArea, areaSelect, byDesc, priority, PRIO_CLASS, capitalize, ICON, fmtInput, doneByText,
 } from '../core.js';
 import { todayStr, issueCost, sortIssues, allStatuses, isNum, fmtDate, fmtMoney, fmtHours } from '../logic.js';
 import { uid } from '../store.js';
 import {
-  useDraft, currentDraft, check, dateRequired, readHours, hoursField, bindDraftForm, formSaved,
+  useDraft, currentDraft, check, dateRequired, readHours, hoursField, bindDraftForm, finishForm, confirmDelete,
   costDraft, doneBySeg, costError, costRecord, savePhotos, draftPhotos,
 } from '../forms.js';
 import { backLink, notFound, facts, html, row, logRow, metaText, metaMoney, metaPhotos, materialsTable, thumbs, notes, formEnd, deleteButton } from '../ui.js';
@@ -212,9 +212,7 @@ async function saveIssue(d) {
     description: d.description.trim(),
     problemPhotoIds: d.problemPhotos.map((p) => p.id),
   });
-  formSaved(d.key);
-  toast(d.isNew ? 'Correctivo apuntado' : 'Cambios guardados');
-  go(d.isNew ? workLink('correctivos', d.area) : idPath('correctivo', d.id));
+  finishForm(d.isNew ? 'Correctivo apuntado' : 'Cambios guardados', d.isNew ? workLink('correctivos', d.area) : idPath('correctivo', d.id));
 }
 
 // ───────────────────────── Marcar como hecho ─────────────────────────
@@ -262,21 +260,16 @@ async function saveIssueClose(d) {
   if (hours === undefined) return;
   await savePhotos(d, i.id);
   await repo.put('issues', { ...i, status: 'hecho', doneDate: d.doneDate, work: d.work.trim(), engineHours: hours, ...costRecord(d) });
-  formSaved(d.key);
-  toast(d.wasDone ? 'Cambios guardados' : 'Correctivo hecho');
-  go(idPath('correctivo', i.id));
+  finishForm(d.wasDone ? 'Cambios guardados' : 'Correctivo hecho', idPath('correctivo', i.id));
 }
 
 // ───────────────────────── Acciones ─────────────────────────
 export const actions = {
-  'delete-issue': async (el) => {
-    if (!confirm('¿Borrar este correctivo y sus fotos? No se puede deshacer.')) return;
+  'delete-issue': (el) => confirmDelete('¿Borrar este correctivo y sus fotos? No se puede deshacer.', async () => {
     const i = issueById(el.dataset.id);
     await deletePhotos([...(i?.problemPhotoIds || []), ...(i?.photoIds || [])]);
     await repo.del('issues', el.dataset.id);
-    toast('Correctivo borrado');
-    go('#/trabajos');
-  },
+  }, 'Correctivo borrado', '#/trabajos'),
   'reopen-issue': async (el) => {
     const i = issueById(el.dataset.id);
     if (!i || !confirm('¿Volver a ponerlo como pendiente? Se borrará el trabajo apuntado, su coste y la factura.')) return;

@@ -2,9 +2,9 @@
 
 import { DEFAULT_SETTINGS, AREAS, PRIORITIES } from './tasks-default.js';
 import { isNum, fmtDate, fmtHours } from './logic.js';
-import { Repo } from './store.js';
+import { Repo, BOATS, PRINCIPAL } from './store.js';
 
-export const APP_VERSION = '1.4.0';
+export const APP_VERSION = '1.5.0';
 export const repo = new Repo();
 export const $view = document.getElementById('view');
 
@@ -29,6 +29,25 @@ export function saveSettings(patch, opts) {
 
 export async function deletePhotos(ids) {
   for (const id of ids || []) await repo.delPhoto(id);
+}
+
+// ── Barcos ─────────────────────────────────────────────────────────────
+// Barcos visibles. El principal existe aunque no tenga ficha (datos de antes de la v1.5).
+export function boats() {
+  const list = repo.state[BOATS].filter((b) => !b.deleted);
+  if (!repo.state[BOATS].some((b) => b.id === PRINCIPAL)) {
+    list.push({ id: PRINCIPAL, name: repo.boatId === PRINCIPAL ? settings().boatName : 'Barco principal', implicit: true });
+  }
+  return list.sort((a, b) => (a.id === PRINCIPAL ? -1 : b.id === PRINCIPAL ? 1 : (a.createdAt || '').localeCompare(b.createdAt || '')));
+}
+
+// Barco elegido en este dispositivo, por modo (local o cuenta)
+const boatKey = (mode) => `velero.boat.${mode}`;
+export const savedBoat = (mode) => localStorage.getItem(boatKey(mode)) || PRINCIPAL;
+
+export async function switchBoat(id) {
+  localStorage.setItem(boatKey(repo.sync.mode), id);
+  await repo.selectBoat(id);
 }
 
 // ── Navegación ─────────────────────────────────────────────────────────

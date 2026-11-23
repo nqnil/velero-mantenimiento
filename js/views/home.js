@@ -1,8 +1,9 @@
 // Pantalla de inicio (Estado) y menú «Apuntar».
 
 import { repo, esc, settings, idPath } from '../core.js';
-import { currentHours, usageRate, allStatuses, sortStatuses, isNum, round1, fmtDate, fmtHours } from '../logic.js';
-import { taskRow, bindReadingForm } from './maintenance.js';
+import { currentHours, usageRate, allStatuses, sortStatuses, engineChanges, isNum, round1, fmtDate, fmtHours } from '../logic.js';
+import { taskRow } from './maintenance.js';
+import { bindReadingForm } from './hours.js';
 import { issueRow, pendingIssues } from './issues.js';
 import { lastTrip, tripRoute } from './logbook.js';
 
@@ -65,6 +66,7 @@ export function viewHome() {
     <p class="meter-info">
       ${cur ? `Lectura del ${fmtDate(cur.date)}.` : 'Apunta las horas que marca el contador del motor.'}
       ${rate ? ` Uso medio: unas ${Math.round(rate * 30.44)} h al mes.` : ''}
+      ${cur?.epoch ? ` Motor actual desde el ${fmtDate(engineChanges(repo.state)[cur.epoch - 1].date)}.` : ''}
     </p>
     <form class="meter-form" id="hours-form">
       <label for="hours-input" class="sr">Horas de motor</label>

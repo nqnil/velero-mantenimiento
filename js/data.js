@@ -1,12 +1,28 @@
 // Datos: tareas por defecto, migraciones y fusión de datos (copias, subida a la nube).
 
 import { DEFAULT_TASKS, AREAS_VERSION } from './tasks-default.js';
-import { repo, EPOCH, settings, saveSettings, find, taskById } from './core.js';
+import { repo, EPOCH, settings, saveSettings, find, taskById, now } from './core.js';
 import { sanitizeRecord } from './logic.js';
-import { COLLECTIONS } from './store.js';
+import { COLLECTIONS, BOATS, PRINCIPAL } from './store.js';
+
+// Prepara los datos del barco abierto una vez por sesión, cuando son fiables
+// (en la nube, cuando el servidor ha confirmado lo que hay: si no, un dispositivo
+// sin sincronizar podría pisar datos).
+let preparedKey = '';
+export async function prepareBoat() {
+  const s = repo.sync;
+  const key = `${s.mode}|${s.email || ''}|${repo.boatId}`;
+  if (preparedKey === key || !s.serverConfirmed || !s.boatsConfirmed) return;
+  // Un barco nuevo sin ajustes todavía se está creando: lo prepara quien lo crea
+  if (!find('meta', 'settings') && repo.boatId !== PRINCIPAL) return;
+  preparedKey = key;
+  await ensureDefaults();
+  await syncBoatEntry();
+}
 
 // Añade las tareas del catálogo que falten (también las que traigan versiones nuevas).
-export async function ensureDefaults() {
+async function ensureDefaults() {
+  if (find('meta', 'settings')?.seedDefaults === false) return migrateAreas();
   const deleted = new Set(settings().deletedDefaults || []);
   const have = new Set(repo.state.tasks.map((t) => t.id));
   for (const t of DEFAULT_TASKS) {
@@ -102,4 +118,14 @@ export async function backupData(version) {
   const data = { app: 'velero-mantenimiento', version, exportedAt: new Date().toISOString(), photos };
   for (const c of COLLECTIONS) data[c] = repo.state[c];
   return { data, missing };
+}
+
+// Mantiene la ficha del barco abierto en la lista de barcos (nombre, modelo y motor de sus ajustes)
+export async function syncBoatEntry() {
+  const st = settings();
+  const cur = find(BOATS, repo.boatId);
+  if (cur?.deleted) return;
+  const want = { name: st.boatName, model: st.boatModel || '', engine: st.engine || '' };
+  if (cur && cur.name === want.name && cur.model === want.model && cur.engine === want.engine) return;
+  await repo.put(BOATS, { ...(cur || { id: repo.boatId, createdAt: now() }), ...want, deleted: false });
 }

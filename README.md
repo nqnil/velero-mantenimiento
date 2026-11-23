@@ -48,7 +48,9 @@ Los valores de `firebaseConfig` no son secretos: lo que protege tus datos es el 
 - **Trabajos**: *Correctivos* (cosas que hay que arreglar, con prioridad urgente/alta/media/baja; al hacerlas se apunta el trabajo y el coste) y *Preventivos* (tareas periódicas). Se filtran por área del barco.
 - **Historial**: preventivo, correctivo y combustible, con el gasto por año y por área.
 - **Tareas preventivas** (en Trabajos): cambia intervalos y avisos, desactiva lo que no lleves o crea tareas nuevas.
-- **Ajustes**: exportar al calendario, sincronización, copia de seguridad.
+- **Ajustes** (engranaje): exportar al calendario, sincronización, copia de seguridad.
+- **Varios barcos**: toca el nombre del barco arriba para cambiar de barco o añadir otro. Cada uno lleva sus propias tareas, horas, bitácora y gastos.
+- **Cambio de motor**: en *Horas de motor → Cambio de motor* pones el contador a cero (o a lo que marque el nuevo). Las tareas por horas empiezan a contar desde el cambio.
 
 ## 5. Para mantener el proyecto
 

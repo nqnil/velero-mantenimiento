@@ -1,16 +1,13 @@
 // Ajustes: barco, avisos, calendario, sincronización y copias de seguridad.
 
 import { DEFAULT_SETTINGS } from '../tasks-default.js';
-import { repo, esc, toast, go, render, settings, saveSettings, APP_VERSION } from '../core.js';
+import { repo, esc, toast, go, render, settings, saveSettings, savedBoat, boats, APP_VERSION } from '../core.js';
 import { todayStr, allStatuses, buildICS } from '../logic.js';
-import { cloudConfigured, signIn, signUp, resetPassword, signOutCloud, readLocalDump, clearLocalData } from '../store.js';
+import {
+  cloudConfigured, signIn, signUp, resetPassword, signOutCloud, readLocalBoats, readLocalDump, clearLocalData, PRINCIPAL, BOATS, COLLECTIONS,
+} from '../store.js';
 import { check, optNumber, bindPlainForm, formSaved } from '../forms.js';
-import { mergeData, backupData } from '../data.js';
-
-let onSync = () => {}; // avisa a app.js de cambios de modo (nube/local)
-export function setSyncListener(fn) {
-  onSync = fn;
-}
+import { mergeData, backupData, syncBoatEntry, prepareBoat } from '../data.js';
 
 export function viewSettings() {
   const st = settings();
@@ -38,7 +35,7 @@ export function viewSettings() {
   const numField = (name, label) => `<label>${label}<input type="number" name="${name}" min="0" step="1" inputmode="numeric" value="${esc(st[name])}"></label>`;
   return `
   <h1>Ajustes</h1>
-  <p><a class="btn" href="#/trabajos?tipo=preventivos">Tareas de mantenimiento e intervalos</a></p>
+  <div class="actions"><a class="btn" href="#/barcos">Barcos</a><a class="btn" href="#/trabajos?tipo=preventivos">Tareas de mantenimiento e intervalos</a><a class="btn" href="#/horas">Horas de motor</a></div>
   <section>
     <h2>Avisos en el calendario</h2>
     <p>Descarga un archivo con las próximas fechas de mantenimiento (24 meses) y ábrelo para añadirlo al calendario. Cada evento lleva dos avisos: con la antelación de la tarea y el día antes.</p>
@@ -52,7 +49,7 @@ export function viewSettings() {
   </section>
 
   <form id="settings-form" class="form">
-    <h2>Barco</h2>
+    <h2>Barco abierto</h2>
     <label>Nombre<input type="text" name="boatName" value="${esc(st.boatName)}"></label>
     <label>Modelo<input type="text" name="boatModel" value="${esc(st.boatModel)}"></label>
     <label>Motor<input type="text" name="engine" value="${esc(st.engine)}"></label>
@@ -65,7 +62,7 @@ export function viewSettings() {
 
   <section>
     <h2>Copia de seguridad</h2>
-    <p>Un archivo con todas tus tareas, intervenciones, correctivos, navegaciones, lecturas y facturas. Guárdalo en iCloud Drive o en tu ordenador.</p>
+    <p>Un archivo con todas las tareas, intervenciones, correctivos, navegaciones, lecturas y facturas de <strong>${esc(st.boatName)}</strong>. Al importar una copia, se añade al barco abierto. Guárdala en iCloud Drive o en tu ordenador.</p>
     <div class="actions">
       <button class="btn" data-action="export-json">Exportar copia</button>
       <label class="btn file"><span>Importar copia</span><input type="file" id="import-input" class="sr" accept="application/json,.json"></label>
@@ -92,6 +89,7 @@ async function saveBoat(form) {
     noticeHours: Math.round(nh),
     noticeDays: Math.round(nd),
   });
+  await syncBoatEntry();
   formSaved();
   toast('Ajustes guardados');
 }
@@ -140,30 +138,47 @@ function authError(err) {
 }
 
 // ───────────────────────── Nube ─────────────────────────
+// Al entrar en la cuenta, ofrece subir lo guardado sin cuenta en este dispositivo
+// (todos los barcos). Si algo ya está en la cuenta, gana la versión más reciente.
 async function switchToCloud(user) {
-  const local = await readLocalDump();
-  const n = (k) => local[k].length;
-  const hasLocal = n('interventions') || n('readings') || n('trips') || n('fuel') || n('issues');
+  const localBoats = (await readLocalBoats()).filter((b) => !b.deleted);
+  const ids = [...new Set([PRINCIPAL, ...localBoats.map((b) => b.id)])];
+  const dumps = {};
+  for (const id of ids) dumps[id] = await readLocalDump(id);
+  const count = (k) => ids.reduce((n, id) => n + dumps[id][k].length, 0);
+  const hasLocal = ['interventions', 'readings', 'trips', 'fuel', 'issues'].some((k) => count(k));
   localStorage.setItem('velero.mode', 'cloud');
-  onSync('before-cloud'); // las tareas por defecto se crearán cuando confirme el servidor
-  await repo.useCloud(user);
-  onSync('cloud');
-  if (hasLocal && confirm(`Este dispositivo tiene datos guardados sin cuenta (${n('interventions')} intervenciones, ${n('issues')} correctivos, ${n('trips')} navegaciones, ${n('fuel')} repostajes y ${n('readings')} lecturas). ¿Subirlos a tu cuenta? Si algo ya está en la cuenta, se conserva la versión más reciente.`)) {
-    await waitServer(10000);
-    const res = await mergeData(local);
-    await clearLocalData(); // ya están en la cuenta: que no se vuelvan a ofrecer ni a mezclar
-    toast(`Datos subidos a tu cuenta (${res.written} registros)`);
+  await repo.open('cloud', user, PRINCIPAL);
+  const boatsText = ids.length > 1 ? ` de ${ids.length} barcos` : '';
+  if (hasLocal && confirm(`Este dispositivo tiene datos guardados sin cuenta${boatsText} (${count('interventions')} intervenciones, ${count('issues')} correctivos, ${count('trips')} navegaciones, ${count('fuel')} repostajes y ${count('readings')} lecturas). ¿Subirlos a tu cuenta? Si algo ya está en la cuenta, se conserva la versión más reciente.`)) {
+    await waitFor((s) => s.boatsConfirmed, 10000);
+    for (const b of localBoats) {
+      const cur = repo.state[BOATS].find((x) => x.id === b.id);
+      if (!cur || (cur.updatedAt || '') < (b.updatedAt || '')) await repo.put(BOATS, b, { touch: false });
+    }
+    let written = 0;
+    for (const id of ids) {
+      if (!COLLECTIONS.some((c) => dumps[id][c].length)) continue;
+      await repo.selectBoat(id);
+      await waitFor((s) => s.serverConfirmed, 10000);
+      written += (await mergeData(dumps[id])).written;
+    }
+    for (const id of ids) await clearLocalData(id); // ya están en la cuenta: que no se vuelvan a ofrecer ni a mezclar
+    toast(`Datos subidos a tu cuenta (${written} registros)`);
   }
+  const target = savedBoat('cloud');
+  if (repo.boatId !== target && boats().some((b) => b.id === target)) await repo.selectBoat(target);
+  await prepareBoat();
   render(true);
 }
 
-// Espera a que la nube confirme los datos del servidor (o se agote el tiempo)
-function waitServer(ms) {
+// Espera a que se cumpla algo del estado de sincronización (o se agote el tiempo)
+function waitFor(cond, ms) {
   return new Promise((resolve) => {
-    if (repo.sync.serverConfirmed) return resolve(true);
+    if (cond(repo.sync)) return resolve(true);
     const t = setTimeout(() => { off(); resolve(false); }, ms);
     const off = repo.onChange((_, sync) => {
-      if (sync.serverConfirmed) { clearTimeout(t); off(); resolve(true); }
+      if (cond(sync)) { clearTimeout(t); off(); resolve(true); }
     });
   });
 }
@@ -235,14 +250,16 @@ export const actions = {
   'export-json': async () => {
     const { data, missing } = await backupData(APP_VERSION);
     if (missing) toast(`Atención: ${missing} ${missing === 1 ? 'foto o factura no está' : 'fotos o facturas no están'} en este dispositivo y no van en la copia. Hazla con conexión.`);
-    await shareOrDownload(new Blob([JSON.stringify(data)], { type: 'application/json' }), `velero-copia-${todayStr()}.json`, 'Copia de seguridad del velero');
+    const slug = settings().boatName.normalize('NFD').replace(/[^\w]+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'velero';
+    await shareOrDownload(new Blob([JSON.stringify(data)], { type: 'application/json' }), `${slug}-copia-${todayStr()}.json`, `Copia de seguridad de ${settings().boatName}`);
   },
   signout: async () => {
     if (!confirm('¿Cerrar sesión en este dispositivo? Tus datos siguen en tu cuenta.')) return;
     await signOutCloud();
     localStorage.setItem('velero.mode', 'local');
-    await repo.useLocal();
-    onSync('local');
+    await repo.open('local', null, savedBoat('local'));
+    if (!boats().some((b) => b.id === repo.boatId)) await repo.selectBoat(PRINCIPAL);
+    await prepareBoat();
     render(true);
   },
   'reset-pw': async () => {

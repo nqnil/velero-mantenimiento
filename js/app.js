@@ -1,21 +1,22 @@
 // Arranque, rutas, navegación y eventos globales.
 
-import { repo, $view, esc, route, setRenderer } from './core.js';
-import { cloudConfigured, currentUser } from './store.js';
-import { ensureDefaults } from './data.js';
+import { repo, $view, esc, route, setRenderer, settings, boats, savedBoat, switchBoat, toast } from './core.js';
+import { cloudConfigured, currentUser, PRINCIPAL, BOATS } from './store.js';
+import { prepareBoat } from './data.js';
 import {
   setFormRoutes, routeFormKey, forgetOtherDrafts, isDirty, discardDraft, closeViewer, loadThumbs, formActions, photoActions,
 } from './forms.js';
 import { viewHome, bindHome, viewNew } from './views/home.js';
 import {
-  viewTask, viewTaskEdit, bindTaskForm, viewRegister, bindRegister, viewIntervention, viewHours, bindHours,
-  actions as maintenanceActions,
+  viewTask, viewTaskEdit, bindTaskForm, viewRegister, bindRegister, viewIntervention, actions as maintenanceActions,
 } from './views/maintenance.js';
+import { viewHours, bindHours, viewEngineChange, bindEngineChange, actions as hoursActions } from './views/hours.js';
+import { viewBoats, viewBoatForm, bindBoatForm, actions as boatActions } from './views/boats.js';
 import { bindAreaFilter } from './ui.js';
 import { viewWork, viewIssue, viewIssueForm, bindIssueForm, viewIssueClose, bindIssueClose, actions as issueActions } from './views/issues.js';
 import { viewLogbook, viewTrip, viewTripForm, bindTripForm, viewFuel, viewFuelForm, bindFuelForm, actions as logbookActions } from './views/logbook.js';
 import { viewHistory } from './views/history.js';
-import { viewSettings, bindSettings, setSyncListener, actions as settingsActions } from './views/settings.js';
+import { viewSettings, bindSettings, actions as settingsActions } from './views/settings.js';
 
 // ───────────────────────── Rutas ─────────────────────────
 // view(r) devuelve el HTML; bind() conecta eventos; form: no se repinta sola; nav: pestaña activa.
@@ -27,6 +28,9 @@ const ROUTES = {
   '': { view: viewHome, bind: bindHome, nav: 'home' },
   nuevo: { view: viewNew, nav: 'add' },
   horas: { view: viewHours, bind: bindHours, nav: 'home' },
+  motor: { view: viewEngineChange, bind: bindEngineChange, form: true, nav: 'home' },
+  barcos: { view: viewBoats, nav: 'boats' },
+  barco: { view: viewBoatForm, bind: bindBoatForm, form: true, nav: 'boats' },
   tarea: { view: (r) => viewTask(id(r)), nav: 'work' },
   'nueva-tarea': { view: () => viewTaskEdit(null), bind: bindTaskForm, form: true, nav: 'work' },
   'editar-tarea': { view: (r) => viewTaskEdit(id(r)), bind: bindTaskForm, form: true, nav: 'work' },
@@ -109,11 +113,11 @@ function onHashChange() {
   (f || $view).focus({ preventScroll: true });
 }
 
-// ───────────────────────── Sincronización ─────────────────────────
+// ───────────────────────── Cabecera: barco y sincronización ─────────────────────────
 const $sync = document.getElementById('sync');
-let seededCloud = false;
+const $boat = document.getElementById('boat-name');
 
-function updateSyncBadge() {
+function updateHeader() {
   const s = repo.sync;
   let txt, cls;
   if (s.mode !== 'cloud') {
@@ -124,26 +128,30 @@ function updateSyncBadge() {
   else [txt, cls] = ['Sincronizado', 'ok'];
   $sync.textContent = txt;
   $sync.className = 'sync ' + cls;
+  const many = boats().length > 1;
+  $boat.textContent = settings().boatName;
+  $boat.title = many ? 'Cambiar de barco' : 'Barcos';
+  $boat.classList.toggle('many', many);
 }
 
-// En la nube, las tareas por defecto solo se crean cuando el servidor ha confirmado
-// lo que ya hay (si no, otro dispositivo sin sincronizar podría pisar datos).
-function checkCloudSeed() {
-  if (repo.sync.mode === 'cloud' && repo.sync.serverConfirmed && !seededCloud) {
-    seededCloud = true;
-    ensureDefaults();
-  }
+// Si el barco abierto se ha borrado (en otro dispositivo), se abre otro
+let leaving = false;
+async function checkBoatGone() {
+  if (leaving || !repo.sync.boatsConfirmed) return;
+  if (!repo.state[BOATS].find((b) => b.id === repo.boatId)?.deleted) return;
+  leaving = true;
+  const next = boats()[0]?.id || PRINCIPAL;
+  await switchBoat(next);
+  leaving = false;
+  toast('El barco que tenías abierto se ha borrado en otro dispositivo.');
+  location.hash = '#/';
 }
-
-setSyncListener((mode) => {
-  if (mode === 'before-cloud') { seededCloud = false; return; }
-  updateSyncBadge();
-  checkCloudSeed();
-});
 
 // ───────────────────────── Acciones (botones con data-action) ─────────────────────────
 const ACTIONS = {
   ...formActions,
+  ...hoursActions,
+  ...boatActions,
   ...photoActions,
   ...maintenanceActions,
   ...issueActions,
@@ -183,40 +191,38 @@ function registerSW() {
 // ───────────────────────── Arranque ─────────────────────────
 async function boot() {
   registerSW();
-  window.addEventListener('online', updateSyncBadge);
-  window.addEventListener('offline', updateSyncBadge);
+  window.addEventListener('online', updateHeader);
+  window.addEventListener('offline', updateHeader);
   // Pide al navegador que no borre los datos de la app para liberar espacio
   navigator.storage?.persist?.().catch(() => {});
 
-  let cloud = false;
+  let user = null;
   if (localStorage.getItem('velero.mode') === 'cloud' && cloudConfigured()) {
     try {
-      const user = await currentUser();
-      if (user) {
-        await repo.useCloud(user);
-        cloud = true;
-      }
+      user = await currentUser();
     } catch (e) {
       console.error(e);
     }
   }
-  if (!cloud) {
-    await repo.useLocal();
-    await ensureDefaults();
-  }
+  const mode = user ? 'cloud' : 'local';
+  await repo.open(mode, user, savedBoat(mode));
+  // El barco guardado en este dispositivo ya no existe: abrir el principal
+  if (!boats().some((b) => b.id === repo.boatId)) await switchBoat(boats()[0]?.id || PRINCIPAL);
 
   repo.onChange(() => {
-    updateSyncBadge();
-    checkCloudSeed();
+    updateHeader();
+    prepareBoat();
+    checkBoatGone();
     scheduleRender();
   });
-  checkCloudSeed();
+  await prepareBoat();
+  checkBoatGone();
   window.addEventListener('hashchange', onHashChange);
   document.addEventListener('click', onClick);
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeViewer();
   });
-  updateSyncBadge();
+  updateHeader();
   currentHash = location.hash;
   render(true);
 }

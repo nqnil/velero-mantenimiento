@@ -1,6 +1,6 @@
 // Service worker: guarda la app en el dispositivo para que abra sin cobertura.
 // Al publicar cambios, sube VERSION para que los dispositivos se actualicen.
-const VERSION = 'v1.4.0';
+const VERSION = 'v1.5.0';
 const CACHE = `velero-${VERSION}`;
 const FILES = [
   './',
@@ -13,6 +13,8 @@ const FILES = [
   './js/forms.js',
   './js/data.js',
   './js/views/home.js',
+  './js/views/hours.js',
+  './js/views/boats.js',
   './js/views/maintenance.js',
   './js/views/issues.js',
   './js/views/logbook.js',

@@ -1,7 +1,7 @@
 // Formularios: borrador en curso, validación, coste (material o factura) y fotos.
 
-import { repo, esc, toast, ICON, route, fmtInput, deletePhotos } from './core.js';
-import { todayStr, daysBetween, hourPoints, parseNum, num, round1, round2, fmtDate, fmtHours, fmtMoney, currentHours } from './logic.js';
+import { repo, esc, toast, go, render, ICON, route, fmtInput, deletePhotos } from './core.js';
+import { todayStr, hoursAnomaly, parseNum, num, round1, round2, fmtDate, fmtHours, fmtMoney, currentHours } from './logic.js';
 import { uid } from './store.js';
 
 // ───────────────────────── Borrador ─────────────────────────
@@ -45,6 +45,21 @@ export function formSaved(key = location.hash) {
   dirty = false;
   dropStoredDraft(key);
   if (draft && draft.key === key) draft = null;
+}
+
+// Fin de un guardado: olvida el borrador, avisa y va a la pantalla indicada
+export function finishForm(msg, href) {
+  formSaved();
+  toast(msg);
+  go(href);
+}
+
+// Confirma, ejecuta el borrado, avisa y repinta (o navega a `href`)
+export async function confirmDelete(question, fn, done, href) {
+  if (!confirm(question)) return;
+  await fn();
+  if (done) toast(done);
+  if (href) go(href); else render(true);
 }
 
 export function discardDraft(key) {
@@ -191,20 +206,14 @@ export function bindPlainForm(id, save) {
 }
 
 // ───────────────────────── Horas de motor ─────────────────────────
-// Comprueba que unas horas encajan con las lecturas de alrededor. Devuelve un aviso o null.
+// Aviso (texto) si unas horas no encajan con las lecturas de su tramo de motor, o null.
 function hoursWarning(hours, date) {
-  let before = null, after = null;
-  for (const p of hourPoints(repo.state)) {
-    if (p.date <= date) before = p;
-    else if (!after) after = p;
-  }
-  if (before) {
-    const days = Math.max(1, daysBetween(before.date, date));
-    if (hours < before.hours - 0.05 && before.date < date) return `Es menos que la lectura del ${fmtDate(before.date)} (${fmtHours(before.hours)}).`;
-    if (hours > before.hours + 24 * days) return `Son ${fmtHours(round1(hours - before.hours))} más que la lectura del ${fmtDate(before.date)}: más de las que caben en ese tiempo.`;
-  }
-  if (after && hours > after.hours + 0.05) return `Es más que la lectura posterior del ${fmtDate(after.date)} (${fmtHours(after.hours)}).`;
-  return null;
+  const a = hoursAnomaly(repo.state, hours, date);
+  if (!a) return null;
+  const when = `la lectura del ${fmtDate(a.point.date)}`;
+  if (a.kind === 'menos') return `Es menos que ${when} (${fmtHours(a.point.hours)}). Si has cambiado de motor, apúntalo en Horas de motor.`;
+  if (a.kind === 'salto') return `Son ${fmtHours(a.diff)} más que ${when}: más de las que caben en ese tiempo.`;
+  return `Es más que ${when.replace('la lectura', 'la lectura posterior')} (${fmtHours(a.point.hours)}).`;
 }
 
 function confirmHours(hours, date) {

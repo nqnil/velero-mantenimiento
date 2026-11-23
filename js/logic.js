@@ -40,37 +40,55 @@ export function daysBetween(a, b) {
 }
 
 // ── Horas de motor ───────────────────────────────────────────────────
-// Puntos (fecha, horas) de lecturas y de intervenciones con horas anotadas.
+// Un cambio de motor (o de contador) es una lectura con kind 'motor': abre un «tramo»
+// nuevo de horas que empieza en sus horas (normalmente 0). Las horas de tramos distintos
+// no se comparan ni se restan entre sí.
+const at = (o) => o.createdAt || o.updatedAt || '';
+const byWhen = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0);
+
+export function engineChanges(state) {
+  return state.readings.filter((r) => r.kind === 'motor').sort(byWhen);
+}
+
+// Tramo (0 = motor original) al que pertenece algo con fecha `date` apuntado en el instante `t`.
+// El mismo día que un cambio, cuenta como del motor nuevo lo apuntado después del cambio.
+export const LATER = '\uffff'; // «apuntado ahora», posterior a cualquier cambio ya guardado
+export function epochAt(changes, date, t = LATER) {
+  let e = 0;
+  changes.forEach((c, i) => {
+    if (date > c.date || (date === c.date && t >= at(c))) e = i + 1;
+  });
+  return e;
+}
+
+// Puntos (fecha, horas, tramo) de lecturas y de todo lo que lleva horas anotadas, en orden.
 // En un mismo día manda lo último que se apuntó (así se corrige un error tecleando de nuevo).
 export function hourPoints(state) {
+  const changes = engineChanges(state);
   const pts = [];
-  const at = (o) => o.createdAt || o.updatedAt || '';
-  for (const r of state.readings) {
-    if (isNum(r.hours)) pts.push({ date: r.date, hours: r.hours, t: at(r), o: 0 });
-  }
-  for (const i of state.interventions) {
-    if (isNum(i.engineHours)) pts.push({ date: i.date, hours: i.engineHours, t: at(i), o: 0 });
-  }
+  // src: colección de origen; o: orden dentro del mismo registro (salida antes que llegada)
+  const add = (src, date, hours, rec, o = 0) => {
+    if (date && isNum(hours)) pts.push({ src, date, hours, t: at(rec), o, epoch: epochAt(changes, date, at(rec)), rec });
+  };
+  for (const r of state.readings) add('readings', r.date, r.hours, r);
+  for (const i of state.interventions) add('interventions', i.date, i.engineHours, i);
   for (const t of state.trips || []) {
-    if (isNum(t.hoursStart)) pts.push({ date: t.date, hours: t.hoursStart, t: at(t), o: 0 });
-    if (isNum(t.hoursEnd)) pts.push({ date: t.endDate || t.date, hours: t.hoursEnd, t: at(t), o: 1 });
+    add('trips', t.date, t.hoursStart, t);
+    add('trips', t.endDate || t.date, t.hoursEnd, t, 1);
   }
-  for (const f of state.fuel || []) {
-    if (isNum(f.engineHours)) pts.push({ date: f.date, hours: f.engineHours, t: at(f), o: 0 });
-  }
-  for (const i of state.issues || []) {
-    if (i.status === 'hecho' && i.doneDate && isNum(i.engineHours)) pts.push({ date: i.doneDate, hours: i.engineHours, t: at(i), o: 0 });
-  }
-  pts.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.t < b.t ? -1 : a.t > b.t ? 1 : a.o - b.o || a.hours - b.hours));
+  for (const f of state.fuel || []) add('fuel', f.date, f.engineHours, f);
+  for (const i of state.issues || []) if (i.status === 'hecho') add('issues', i.doneDate, i.engineHours, i);
+  const cmp = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
+  pts.sort((a, b) => a.epoch - b.epoch || cmp(a.date, b.date) || cmp(a.t, b.t) || a.o - b.o || a.hours - b.hours);
   return pts;
 }
 
-// Horas aproximadas en una fecha, interpolando entre lecturas.
+// Horas aproximadas en una fecha, interpolando entre lecturas del mismo tramo.
 // Si solo hay lecturas anteriores, usa la última (estimación prudente: avisa antes).
-export function hoursAt(state, date) {
-  const pts = hourPoints(state);
+export function hoursAt(state, date, epoch) {
   let before = null, after = null;
-  for (const p of pts) {
+  for (const p of hourPoints(state)) {
+    if (epoch !== undefined && p.epoch !== epoch) continue;
     if (p.date <= date) before = p;
     else if (!after) after = p;
   }
@@ -82,27 +100,49 @@ export function hoursAt(state, date) {
   return before ? before.hours : null;
 }
 
+// Lectura más reciente del motor actual: { hours, date, epoch }
 export function currentHours(state) {
   const pts = hourPoints(state);
   if (!pts.length) return null;
-  const last = pts[pts.length - 1];
-  return { hours: last.hours, date: last.date };
+  const { hours, date, epoch } = pts[pts.length - 1];
+  return { hours, date, epoch };
 }
 
 // Ritmo de uso en horas/día. Usa el último año si hay datos suficientes.
+// Con cambios de motor, suma lo que avanzó cada tramo por separado.
 export function usageRate(state, today = todayStr()) {
   const pts = hourPoints(state);
-  if (pts.length < 2) return null;
-  const last = pts[pts.length - 1];
   const yearAgo = addDays(today, -400);
-  const recent = pts.filter((p) => p.date >= yearAgo);
-  const candidates = [recent.length >= 2 ? recent : null, pts].filter(Boolean);
-  for (const set of candidates) {
-    const first = set[0];
-    const span = daysBetween(first.date, last.date);
-    const delta = last.hours - first.hours;
+  for (const set of [pts.filter((p) => p.date >= yearAgo), pts]) {
+    if (set.length < 2) continue;
+    const ends = new Map();
+    for (const p of set) {
+      const e = ends.get(p.epoch);
+      if (e) e.last = p; else ends.set(p.epoch, { first: p, last: p });
+    }
+    const delta = [...ends.values()].reduce((s, e) => s + Math.max(0, e.last.hours - e.first.hours), 0);
+    const dates = set.map((p) => p.date).sort();
+    const span = daysBetween(dates[0], dates[dates.length - 1]);
     if (span >= 21 && delta > 0) return delta / span;
   }
+  return null;
+}
+
+// ¿Encajan unas horas nuevas con las lecturas de su tramo? Devuelve null o
+// { kind: 'menos' | 'salto' | 'mas', point, diff } para avisar al usuario.
+export function hoursAnomaly(state, hours, date) {
+  const epoch = epochAt(engineChanges(state), date);
+  let before = null, after = null;
+  for (const p of hourPoints(state)) {
+    if (p.epoch !== epoch) continue;
+    if (p.date <= date) before = p;
+    else if (!after) after = p;
+  }
+  if (before) {
+    if (hours < before.hours - 0.05 && before.date < date) return { kind: 'menos', point: before };
+    if (hours > before.hours + 24 * Math.max(1, daysBetween(before.date, date))) return { kind: 'salto', point: before, diff: round1(hours - before.hours) };
+  }
+  if (after && hours > after.hours + 0.05) return { kind: 'mas', point: after };
   return null;
 }
 
@@ -163,11 +203,18 @@ export function taskStatus(task, state, settings, today = todayStr(), cache = {}
   }
   if (res.dueDate) res.daysLeft = daysBetween(today, res.dueDate);
 
-  // Por horas
+  // Por horas. Si el motor se cambió después de la última vez, se cuenta desde el cambio.
   if (isNum(task.intervalHours) && task.intervalHours > 0) {
-    let base = isNum(last.engineHours) ? last.engineHours : null;
-    if (base === null) {
-      base = hoursAt(state, last.date);
+    const changes = cache.changes || engineChanges(state);
+    const lastEpoch = epochAt(changes, last.date, at(last));
+    let base = null;
+    if (lastEpoch < changes.length) {
+      res.engineChange = changes[changes.length - 1];
+      base = res.engineChange.hours;
+    } else if (isNum(last.engineHours)) {
+      base = last.engineHours;
+    } else {
+      base = hoursAt(state, last.date, lastEpoch);
       if (base !== null) res.hoursEstimated = true;
     }
     if (base !== null) {
@@ -206,7 +253,7 @@ export function taskStatus(task, state, settings, today = todayStr(), cache = {}
 }
 
 export function allStatuses(state, settings, today = todayStr()) {
-  const cache = { cur: currentHours(state), rate: usageRate(state, today) };
+  const cache = { cur: currentHours(state), rate: usageRate(state, today), changes: engineChanges(state) };
   return state.tasks.map((t) => taskStatus(t, state, settings, today, cache));
 }
 
@@ -497,7 +544,12 @@ export function sanitizeRecord(col, o) {
     }
     case 'readings':
       if (!isPast(o.date) || optNum(o.hours) === null) return null;
-      return { ...base, date: o.date, hours: o.hours };
+      return o.kind === 'motor'
+        ? { ...base, date: o.date, hours: o.hours, kind: 'motor', engine: str(o.engine, 200) }
+        : { ...base, date: o.date, hours: o.hours };
+    case 'boats':
+      if (!o.deleted && !str(o.name).trim()) return null;
+      return { ...base, name: str(o.name, 100), model: str(o.model, 200), engine: str(o.engine, 200), deleted: !!o.deleted };
     case 'trips': {
       if (!isPast(o.date)) return null;
       const end = optDate(o.endDate);

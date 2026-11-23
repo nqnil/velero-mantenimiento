@@ -1,9 +1,9 @@
 // Bitácora de navegaciones y repostajes de combustible.
 
-import { repo, esc, toast, go, idPath, link, find, now, byDateDesc, fmtNum, fmtInput, LONG_DATE } from '../core.js';
+import { repo, esc, idPath, link, find, now, byDateDesc, fmtNum, fmtInput, LONG_DATE } from '../core.js';
 import { todayStr, currentHours, daysBetween, tripEngineHours, tripDays, tripStats, isNum, num, parseNum, round1, round2, fmtDate, fmtMoney, fmtHours } from '../logic.js';
 import { uid } from '../store.js';
-import { useDraft, currentDraft, check, dateRequired, optNumber, readHours, hoursField, bindDraftForm, formSaved } from '../forms.js';
+import { useDraft, currentDraft, check, dateRequired, optNumber, readHours, hoursField, bindDraftForm, finishForm, confirmDelete } from '../forms.js';
 import { backLink, notFound, facts, html, logRow, metaText, metaMoney, years, pickYear, yearChips, notes, formEnd, deleteButton } from '../ui.js';
 
 // ───────────────────────── Textos ─────────────────────────
@@ -324,9 +324,7 @@ async function saveTrip(d) {
     await repo.del('fuel', old.id);
   }
   await repo.put('trips', trip);
-  formSaved(d.key);
-  toast(d.isNew ? 'Navegación guardada' : 'Cambios guardados');
-  go(d.isNew ? '#/bitacora' : idPath('navegacion', trip.id));
+  finishForm(d.isNew ? 'Navegación guardada' : 'Cambios guardados', d.isNew ? '#/bitacora' : idPath('navegacion', trip.id));
 }
 
 // ───────────────────────── Repostajes ─────────────────────────
@@ -410,28 +408,22 @@ async function saveFuel(d) {
     notes: d.notes.trim(),
     createdAt: d.createdAt || now(),
   });
-  formSaved(d.key);
-  toast(d.isNew ? 'Repostaje guardado' : 'Cambios guardados');
-  go(d.isNew ? '#/historial?tipo=combustible' : idPath('repostaje', d.id));
+  finishForm(d.isNew ? 'Repostaje guardado' : 'Cambios guardados', d.isNew ? '#/historial?tipo=combustible' : idPath('repostaje', d.id));
 }
 
 // ───────────────────────── Acciones ─────────────────────────
 export const actions = {
-  'delete-trip': async (el) => {
+  'delete-trip': (el) => {
     const t = find('trips', el.dataset.id);
-    if (!confirm(t?.fuelId ? '¿Borrar esta navegación y el repostaje apuntado en ella? No se puede deshacer.' : '¿Borrar esta navegación? No se puede deshacer.')) return;
-    if (t?.fuelId) await repo.del('fuel', t.fuelId);
-    await repo.del('trips', el.dataset.id);
-    toast('Navegación borrada');
-    go('#/bitacora');
+    return confirmDelete(t?.fuelId ? '¿Borrar esta navegación y el repostaje apuntado en ella? No se puede deshacer.' : '¿Borrar esta navegación? No se puede deshacer.', async () => {
+      if (t?.fuelId) await repo.del('fuel', t.fuelId);
+      await repo.del('trips', el.dataset.id);
+    }, 'Navegación borrada', '#/bitacora');
   },
-  'delete-fuel': async (el) => {
-    if (!confirm('¿Borrar este repostaje? No se puede deshacer.')) return;
+  'delete-fuel': (el) => confirmDelete('¿Borrar este repostaje? No se puede deshacer.', async () => {
     const f = find('fuel', el.dataset.id);
     const t = f?.tripId ? find('trips', f.tripId) : null;
     if (t) await repo.put('trips', { ...t, fuelId: null });
     await repo.del('fuel', el.dataset.id);
-    toast('Repostaje borrado');
-    go('#/historial?tipo=combustible');
-  },
+  }, 'Repostaje borrado', '#/historial?tipo=combustible'),
 };

@@ -2,27 +2,25 @@
 
 import { AREAS } from '../tasks-default.js';
 import {
-  repo, esc, toast, go, render, route, idPath, settings, saveSettings, taskById, find, now, deletePhotos, ICON, byDateDesc,
+  repo, esc, toast, go, route, idPath, settings, saveSettings, taskById, find, now, deletePhotos, byDateDesc,
   areaName, validArea, areaSelect, intervalText, relDays, dueText, STATUS_LABEL, LONG_DATE, fmtInput, doneByText,
 } from '../core.js';
 import {
-  todayStr, taskStatus, usageRate, interventionCost, isNum, fmtDate, fmtMoney, fmtHours,
+  todayStr, taskStatus, interventionCost, isNum, fmtDate, fmtMoney, fmtHours,
 } from '../logic.js';
 import { uid } from '../store.js';
 import {
-  useDraft, currentDraft, markDirty, formSaved, check, dateRequired, readHours, hoursField, bindDraftForm, bindPlainForm, guarded,
-  costDraft, doneBySeg, costError, costRecord, savePhotos, optNumber,
+  useDraft, currentDraft, markDirty, formSaved, finishForm, confirmDelete, check, dateRequired, readHours, hoursField, bindDraftForm, bindPlainForm, costDraft, doneBySeg, costError, costRecord, savePhotos, optNumber,
 } from '../forms.js';
 import {
   backLink, notFound, facts, row, logRow, metaText, metaMoney, metaPhotos, materialsTable, thumbs, notes,
   formEnd, deleteButton,
 } from '../ui.js';
-import { tripRoute } from './logbook.js';
 
 // ───────────────────────── Textos de intervenciones ─────────────────────────
 const taskNames = (i) => (i.taskIds || []).map((id) => taskById(id)?.name).filter(Boolean);
 
-function interventionTitle(i) {
+export function interventionTitle(i) {
   const names = taskNames(i);
   if (i.title) return names.length ? `${i.title}: ${names.join(', ')}` : i.title;
   return names.join(', ') || 'Intervención';
@@ -83,6 +81,7 @@ export function viewTask(id) {
       s.dueDate && [t.type === 'caducidad' ? 'Caduca / próxima revisión' : 'Próxima por fecha', `${fmtDate(s.dueDate)} (${relDays(s.daysLeft)})`],
       s.dueHours !== null && ['Próxima por horas', `a las ${fmtHours(s.dueHours)}${hoursLeft}`],
       s.estDateFromHours && s.hoursLeft > 0 && ['Estimación por uso', `hacia el ${fmtDate(s.estDateFromHours)}`],
+      s.engineChange && ['Motor', `Cambiado el ${fmtDate(s.engineChange.date)}: las horas de esta tarea cuentan desde el cambio.`],
       s.hoursEstimated && ['Horas', 'El último registro no tiene horas de motor: se han estimado con tus lecturas de esa época.'],
       s.noDate && ['Próxima', t.type === 'caducidad' ? 'Falta la fecha de caducidad: registra la tarea de nuevo anotándola, o pon un intervalo en meses.' : 'Faltan datos para calcularla.'],
       s.missingHours && ['Horas', 'El último registro no tiene horas de motor: no se puede calcular el aviso por horas.'],
@@ -153,9 +152,7 @@ async function saveTask(form) {
   };
   check(obj.type !== 'intervalo' || obj.intervalHours || obj.intervalMonths, 'Indica cada cuántas horas o cada cuántos meses toca.');
   await repo.put('tasks', obj);
-  formSaved();
-  toast('Tarea guardada');
-  go(idPath('tarea', id));
+  finishForm('Tarea guardada', idPath('tarea', id));
 }
 
 // ───────────────────────── Registrar / editar intervención ─────────────────────────
@@ -311,9 +308,7 @@ async function saveIntervention(d) {
     notes: d.notes.trim(),
     createdAt: d.createdAt || now(),
   });
-  formSaved(d.key);
-  toast(d.isNew ? 'Intervención guardada' : 'Cambios guardados');
-  go(d.isNew ? '#/' : idPath('intervencion', d.id));
+  finishForm(d.isNew ? 'Intervención guardada' : 'Cambios guardados', d.isNew ? '#/' : idPath('intervencion', d.id));
 }
 
 // ───────────────────────── Ver intervención ─────────────────────────
@@ -342,59 +337,6 @@ export function viewIntervention(id) {
   </article>`;
 }
 
-// ───────────────────────── Horas de motor ─────────────────────────
-export function viewHours() {
-  const point = (id, date, hours, title, href) => ({ id, date, hours, title, href });
-  const pts = [
-    ...repo.state.readings.map((r) => ({ ...r, reading: true })),
-    ...repo.state.interventions.filter((i) => isNum(i.engineHours)).map((i) => point(i.id, i.date, i.engineHours, interventionTitle(i), idPath('intervencion', i.id))),
-    ...repo.state.trips.flatMap((t) => [
-      isNum(t.hoursStart) && point(t.id, t.date, t.hoursStart, `Salida: ${tripRoute(t)}`, idPath('navegacion', t.id)),
-      isNum(t.hoursEnd) && point(t.id, t.endDate || t.date, t.hoursEnd, `Llegada: ${tripRoute(t)}`, idPath('navegacion', t.id)),
-    ].filter(Boolean)),
-    ...repo.state.issues.filter((i) => i.status === 'hecho' && isNum(i.engineHours)).map((i) => point(i.id, i.doneDate, i.engineHours, `Correctivo: ${i.title}`, idPath('correctivo', i.id))),
-    ...repo.state.fuel.filter((f) => isNum(f.engineHours) && !f.tripId).map((f) => point(f.id, f.date, f.engineHours, 'Repostaje', idPath('repostaje', f.id))),
-  ].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.hours - a.hours));
-  const rate = usageRate(repo.state);
-  return `
-  ${backLink('#/', 'Estado')}
-  <h1>Horas de motor</h1>
-  <p class="muted">${rate ? `Uso medio: unas ${Math.round(rate * 30.44)} h al mes. Con este ritmo se estiman las fechas de las tareas por horas.` : 'Con al menos dos lecturas separadas unas semanas, la app estimará en qué fecha te tocará cada tarea por horas.'}</p>
-  <form class="form inline" id="reading-form">
-    <label>Fecha<input type="date" name="date" value="${todayStr()}" max="${todayStr()}" required></label>
-    <label>Horas<input type="text" name="hours" inputmode="decimal" required></label>
-    <button class="btn primary" type="submit">Anotar</button>
-  </form>
-  ${pts.length ? `<ul class="log">${pts.map((p) => `
-    <li class="logrow static">
-      <time datetime="${esc(p.date)}">${fmtDate(p.date)}</time>
-      <span class="log-title">${fmtHours(p.hours)}</span>
-      <span class="log-meta">${p.reading
-        ? `<span>Lectura</span><button class="icon" data-action="delete-reading" data-id="${esc(p.id)}" aria-label="Borrar lectura">${ICON.trash}</button>`
-        : `<a href="${esc(p.href)}">${esc(p.title)}</a>`}</span>
-    </li>`).join('')}</ul>` : '<p class="muted">Aún no hay lecturas.</p>'}`;
-}
-
-// Formulario de lectura (Estado y Horas). date: campo de fecha o null para hoy.
-export function bindReadingForm(id, after) {
-  const form = document.getElementById(id);
-  form?.addEventListener('submit', (e) => {
-    e.preventDefault();
-    guarded(form, async () => {
-      const date = form.date ? dateRequired(form.date.value) : todayStr();
-      const v = optNumber(form.hours.value, 'Escribe las horas con números, por ejemplo 1180,5');
-      check(v !== null, 'Escribe las horas con números, por ejemplo 1180,5');
-      const h = readHours(v, date);
-      if (h === undefined) return;
-      await repo.put('readings', { id: uid(), date, hours: h, createdAt: now() });
-      toast(`Anotadas ${fmtHours(h)}`);
-      after?.();
-    });
-  });
-}
-
-export const bindHours = () => bindReadingForm('reading-form', () => render(true));
-
 // ───────────────────────── Acciones ─────────────────────────
 export const actions = {
   unpick: (el) => {
@@ -404,13 +346,10 @@ export const actions = {
     markDirty(d);
     refreshPicked(d);
   },
-  'delete-intervention': async (el) => {
-    if (!confirm('¿Borrar esta intervención? No se puede deshacer.')) return;
+  'delete-intervention': (el) => confirmDelete('¿Borrar esta intervención? No se puede deshacer.', async () => {
     await deletePhotos(find('interventions', el.dataset.id)?.photoIds);
     await repo.del('interventions', el.dataset.id);
-    toast('Intervención borrada');
-    go('#/historial');
-  },
+  }, 'Intervención borrada', '#/historial'),
   'delete-task': async (el) => {
     const id = el.dataset.id;
     const used = repo.state.interventions.some((i) => (i.taskIds || []).includes(id));
@@ -422,11 +361,6 @@ export const actions = {
     formSaved();
     toast('Tarea borrada');
     go('#/trabajos?tipo=preventivos');
-  },
-  'delete-reading': async (el) => {
-    if (!confirm('¿Borrar esta lectura?')) return;
-    await repo.del('readings', el.dataset.id);
-    render(true);
   },
 };
 
