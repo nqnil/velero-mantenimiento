@@ -1,11 +1,11 @@
 // Varios barcos: lista, cambiar de barco, alta y borrado.
 
 import { AREAS_VERSION } from '../tasks-default.js';
-import { repo, esc, toast, go, render, boats, switchBoat, saveSettings, now } from '../core.js';
+import { repo, esc, toast, go, render, boats, switchBoat, settings, saveSettings, now } from '../core.js';
 import { BOATS, uid } from '../store.js';
 import { check, bindPlainForm, finishForm } from '../forms.js';
 import { backLink, formEnd } from '../ui.js';
-import { prepareBoat } from '../data.js';
+import { ensureDefaults } from '../data.js';
 
 const TEMPLATES = [
   { id: 'tipica', name: 'Lista típica de un velero', hint: 'Las ~70 tareas de motor, jarcia, casco, seguridad… Luego desactivas lo que no lleve.' },
@@ -24,7 +24,7 @@ export function viewBoats() {
     return `<li class="boat${cur ? ' current' : ''}">
       <button type="button" data-action="select-boat" data-id="${esc(b.id)}" ${cur ? 'aria-current="true"' : ''}>
         <strong>${esc(b.name)}</strong>
-        <span>${esc([b.model, b.engine].filter(Boolean).join('. ') || (cur ? 'Barco abierto' : ''))}${cur ? ' (abierto)' : ''}</span>
+        <span>${esc([b.model, b.engine].filter(Boolean).join('. '))}${cur ? `${b.model || b.engine ? ' ' : ''}(abierto)` : ''}</span>
       </button>
       ${!cur && list.length > 1 ? `<button type="button" class="btn small danger" data-action="delete-boat" data-id="${esc(b.id)}">Borrar</button>` : ''}
     </li>`;
@@ -55,14 +55,17 @@ async function saveBoat(form) {
   const template = form.template.value;
   const model = form.model.value.trim();
   const engine = form.engine.value.trim();
-  // Las tareas a copiar se toman antes de cambiar de barco
+  // Lo que se copia se toma antes de cambiar de barco: tareas, avisos y tareas del catálogo borradas
+  const src = settings();
   const copy = template === 'copiar' ? repo.state.tasks.map((t) => ({ ...t })) : [];
+  const extra = template === 'copiar' ? { deletedDefaults: src.deletedDefaults || [], noticeHours: src.noticeHours, noticeDays: src.noticeDays } : {};
   const id = uid();
   await repo.put(BOATS, { id, name, model, engine, deleted: false, createdAt: now() });
   await switchBoat(id);
-  await saveSettings({ boatName: name, boatModel: model, engine, seedDefaults: template === 'tipica', areasVersion: AREAS_VERSION });
+  await saveSettings({ boatName: name, boatModel: model, engine, seedDefaults: template !== 'vacia', areasVersion: AREAS_VERSION, ...extra });
   for (const t of copy) await repo.put('tasks', t, { touch: false });
-  await prepareBoat();
+  // Un barco recién creado no tiene datos en ningún otro sitio: se siembra ya, también sin conexión
+  if (template === 'tipica') await ensureDefaults();
   finishForm(`Barco «${name}» añadido`, '#/');
 }
 
@@ -78,15 +81,21 @@ export const actions = {
   'delete-boat': async (el) => {
     const b = boats().find((x) => x.id === el.dataset.id);
     if (!b || b.id === repo.boatId) return;
+    // En la nube hace falta conexión: sin ella solo se borraría lo que este dispositivo tiene guardado
+    if (repo.sync.mode === 'cloud' && !navigator.onLine) { toast('Necesitas conexión para borrar un barco.'); return; }
     if (!confirm(`¿Borrar «${b.name}» con todas sus tareas, intervenciones, navegaciones, gastos y fotos? No se puede deshacer.`)) return;
-    if (prompt(`Para confirmar, escribe el nombre del barco: ${b.name}`)?.trim().toLowerCase() !== b.name.toLowerCase()) {
-      toast('No se ha borrado: el nombre no coincide.');
-      return;
+    const typed = prompt(`Para confirmar, escribe el nombre del barco: ${b.name}`);
+    if (typed === null) { toast('Cancelado.'); return; }
+    if (typed.trim().toLowerCase() !== b.name.toLowerCase()) { toast('No se ha borrado: el nombre no coincide.'); return; }
+    try {
+      // Se deja una marca de borrado para que los demás dispositivos lo quiten también
+      await repo.put(BOATS, { ...(repo.state[BOATS].find((x) => x.id === b.id) || { id: b.id, createdAt: now() }), name: b.name, deleted: true });
+      await repo.clearBoat(b.id);
+      toast(`«${b.name}» borrado`);
+    } catch (e) {
+      console.error(e);
+      toast(`No se ha podido borrar del todo: ${e.message || e}. Vuelve a intentarlo con conexión.`);
     }
-    // Se deja una marca de borrado para que los demás dispositivos lo quiten también
-    await repo.put(BOATS, { ...(repo.state[BOATS].find((x) => x.id === b.id) || { id: b.id, createdAt: now() }), name: b.name, deleted: true });
-    await repo.clearBoat(b.id);
-    toast(`«${b.name}» borrado`);
     render(true);
   },
 };

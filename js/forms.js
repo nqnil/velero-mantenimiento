@@ -16,22 +16,22 @@ export function setFormRoutes(keys) {
 }
 export const isDirty = () => dirty;
 // Borrador del formulario visible, o null si no hay (p. ej. el registro no existe)
-export const currentDraft = () => (draft && draft.key === location.hash ? draft : null);
+export const currentDraft = () => (draft && draft.key === location.hash && draft.boatId === repo.boatId ? draft : null);
 
 // Devuelve el borrador de la ruta actual: el que hay en memoria, el guardado (tras una
 // recarga de iOS) o uno nuevo hecho con make().
 export function useDraft(make) {
   const key = location.hash;
-  if (!draft || draft.key !== key) {
+  if (!draft || draft.key !== key || draft.boatId !== repo.boatId) {
     draft = loadStoredDraft(key) || make();
-    if (draft) draft.key = key;
+    if (draft) Object.assign(draft, { key, boatId: repo.boatId });
   }
   return draft;
 }
 
 // Al cambiar de pantalla, el borrador de otra ruta se olvida
 export function forgetOtherDrafts() {
-  if (draft && draft.key !== location.hash) draft = null;
+  if (draft && (draft.key !== location.hash || draft.boatId !== repo.boatId)) draft = null;
 }
 
 export function markDirty(d) {
@@ -89,7 +89,8 @@ function storeDraft(d) {
 function loadStoredDraft(key) {
   try {
     const o = JSON.parse(sessionStorage.getItem(DRAFT_PREFIX + key) || 'null');
-    if (!o || typeof o !== 'object') return null;
+    // Un borrador de otro barco (otra pestaña cambió de barco) no se recupera aquí
+    if (!o || typeof o !== 'object' || o.boatId !== repo.boatId) return null;
     if (Array.isArray(o.taskIds)) o.taskIds = new Set(o.taskIds);
     dirty = true;
     return o;
@@ -211,7 +212,7 @@ function hoursWarning(hours, date) {
   const a = hoursAnomaly(repo.state, hours, date);
   if (!a) return null;
   const when = `la lectura del ${fmtDate(a.point.date)}`;
-  if (a.kind === 'menos') return `Es menos que ${when} (${fmtHours(a.point.hours)}). Si has cambiado de motor, apúntalo en Horas de motor.`;
+  if (a.kind === 'menos') return `Es menos que ${when} (${fmtHours(a.point.hours)}). Si has cambiado de motor, apúntalo antes con «Cambio de motor» en Horas de motor.`;
   if (a.kind === 'salto') return `Son ${fmtHours(a.diff)} más que ${when}: más de las que caben en ese tiempo.`;
   return `Es más que ${when.replace('la lectura', 'la lectura posterior')} (${fmtHours(a.point.hours)}).`;
 }

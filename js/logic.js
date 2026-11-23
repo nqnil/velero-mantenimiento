@@ -64,11 +64,14 @@ export function epochAt(changes, date, t = LATER) {
 // Puntos (fecha, horas, tramo) de lecturas y de todo lo que lleva horas anotadas, en orden.
 // En un mismo día manda lo último que se apuntó (así se corrige un error tecleando de nuevo).
 export function hourPoints(state) {
-  const changes = engineChanges(state);
+  const ctx = engineContext(state);
   const pts = [];
   // src: colección de origen; o: orden dentro del mismo registro (salida antes que llegada)
   const add = (src, date, hours, rec, o = 0) => {
-    if (date && isNum(hours)) pts.push({ src, date, hours, t: at(rec), o, epoch: epochAt(changes, date, at(rec)), rec });
+    if (!date || !isNum(hours)) return;
+    const t = src === 'issues' ? rec.doneAt || rec.updatedAt || '' : at(rec);
+    const epoch = rec.kind === 'motor' ? ctx.changes.indexOf(rec) + 1 : epochOf(ctx, date, t, hours);
+    pts.push({ src, date, hours, t, o, epoch, rec });
   };
   for (const r of state.readings) add('readings', r.date, r.hours, r);
   for (const i of state.interventions) add('interventions', i.date, i.engineHours, i);
@@ -81,6 +84,37 @@ export function hourPoints(state) {
   const cmp = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
   pts.sort((a, b) => a.epoch - b.epoch || cmp(a.date, b.date) || cmp(a.t, b.t) || a.o - b.o || a.hours - b.hours);
   return pts;
+}
+
+// Tramos de motor y, para cada cambio, las últimas horas conocidas del motor anterior
+export function engineContext(state) {
+  const changes = engineChanges(state);
+  const oldLast = changes.map((c, i) => {
+    let best = null;
+    const consider = (date, hours) => {
+      if (!date || !isNum(hours) || date >= c.date || epochAt(changes, date, '') !== i) return;
+      if (!best || date >= best.date) best = { date, hours };
+    };
+    for (const r of state.readings) if (r.kind !== 'motor') consider(r.date, r.hours);
+    for (const x of state.interventions) consider(x.date, x.engineHours);
+    for (const t of state.trips || []) { consider(t.date, t.hoursStart); consider(t.endDate || t.date, t.hoursEnd); }
+    for (const f of state.fuel || []) consider(f.date, f.engineHours);
+    for (const x of state.issues || []) if (x.status === 'hecho') consider(x.doneDate, x.engineHours);
+    return best ? best.hours : null;
+  });
+  return { changes, oldLast };
+}
+
+// Tramo de algo con horas. El día de un cambio de motor no basta con el orden en que se
+// apuntó (se puede apuntar después algo del motor viejo): decide qué horas encajan mejor,
+// las del motor anterior o las del nuevo.
+export function epochOf(ctx, date, t, hours) {
+  let e = epochAt(ctx.changes, date, t);
+  ctx.changes.forEach((c, i) => {
+    if (date !== c.date || !isNum(hours) || ctx.oldLast[i] === null) return;
+    e = Math.abs(hours - c.hours) <= Math.abs(hours - ctx.oldLast[i]) ? i + 1 : i;
+  });
+  return e;
 }
 
 // Horas aproximadas en una fecha, interpolando entre lecturas del mismo tramo.
@@ -131,7 +165,7 @@ export function usageRate(state, today = todayStr()) {
 // ¿Encajan unas horas nuevas con las lecturas de su tramo? Devuelve null o
 // { kind: 'menos' | 'salto' | 'mas', point, diff } para avisar al usuario.
 export function hoursAnomaly(state, hours, date) {
-  const epoch = epochAt(engineChanges(state), date);
+  const epoch = epochOf(engineContext(state), date, LATER, hours);
   let before = null, after = null;
   for (const p of hourPoints(state)) {
     if (p.epoch !== epoch) continue;
@@ -205,8 +239,9 @@ export function taskStatus(task, state, settings, today = todayStr(), cache = {}
 
   // Por horas. Si el motor se cambió después de la última vez, se cuenta desde el cambio.
   if (isNum(task.intervalHours) && task.intervalHours > 0) {
-    const changes = cache.changes || engineChanges(state);
-    const lastEpoch = epochAt(changes, last.date, at(last));
+    const ctx = cache.ctx || engineContext(state);
+    const changes = ctx.changes;
+    const lastEpoch = epochOf(ctx, last.date, at(last), last.engineHours);
     let base = null;
     if (lastEpoch < changes.length) {
       res.engineChange = changes[changes.length - 1];
@@ -253,7 +288,7 @@ export function taskStatus(task, state, settings, today = todayStr(), cache = {}
 }
 
 export function allStatuses(state, settings, today = todayStr()) {
-  const cache = { cur: currentHours(state), rate: usageRate(state, today), changes: engineChanges(state) };
+  const cache = { cur: currentHours(state), rate: usageRate(state, today), ctx: engineContext(state) };
   return state.tasks.map((t) => taskStatus(t, state, settings, today, cache));
 }
 
@@ -343,7 +378,10 @@ export function fuelConsumption(fuel) {
 }
 
 // ── Calendario (.ics) ────────────────────────────────────────────────
-export function buildICS(statuses, settings, { horizonMonths = 24, today = todayStr() } = {}) {
+// boatId: los barcos que no son el principal llevan su id en el UID de cada evento,
+// para que importar el calendario de otro barco no pise los eventos de este.
+export function buildICS(statuses, settings, { horizonMonths = 24, today = todayStr(), boatId = 'principal' } = {}) {
+  const uidSuffix = boatId === 'principal' ? '' : `.${boatId}`;
   const limit = addMonths(today, horizonMonths);
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
   const lines = [
@@ -372,7 +410,7 @@ export function buildICS(statuses, settings, { horizonMonths = 24, today = today
     const end = addDays(date, 1).replace(/-/g, '');
     lines.push(
       'BEGIN:VEVENT',
-      `UID:${s.task.id}@velero-mantenimiento`,
+      `UID:${s.task.id}${uidSuffix}@velero-mantenimiento`,
       `DTSTAMP:${stamp}`,
       `DTSTART;VALUE=DATE:${d}`,
       `DTEND;VALUE=DATE:${end}`,
@@ -540,6 +578,7 @@ export function sanitizeRecord(col, o) {
         workshop: done ? str(o.workshop, 200) : '',
         invoiceTotal: done ? optNum(o.invoiceTotal) : null,
         photoIds: done && Array.isArray(o.photoIds) ? o.photoIds.filter((x) => typeof x === 'string') : [],
+        doneAt: done ? str(o.doneAt, 40) : '',
       };
     }
     case 'readings':
@@ -594,6 +633,7 @@ export function sanitizeRecord(col, o) {
       if (optNum(o.noticeHours) !== null) m.noticeHours = o.noticeHours;
       if (optNum(o.noticeDays) !== null) m.noticeDays = o.noticeDays;
       if (Array.isArray(o.deletedDefaults)) m.deletedDefaults = o.deletedDefaults.filter((x) => typeof x === 'string');
+      if (typeof o.seedDefaults === 'boolean') m.seedDefaults = o.seedDefaults;
       if (Number.isInteger(o.areasVersion)) m.areasVersion = o.areasVersion;
       return m;
     }

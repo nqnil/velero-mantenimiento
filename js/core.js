@@ -35,18 +35,23 @@ export async function deletePhotos(ids) {
 // Barcos visibles. El principal existe aunque no tenga ficha (datos de antes de la v1.5).
 export function boats() {
   const list = repo.state[BOATS].filter((b) => !b.deleted);
-  if (!repo.state[BOATS].some((b) => b.id === PRINCIPAL)) {
-    list.push({ id: PRINCIPAL, name: repo.boatId === PRINCIPAL ? settings().boatName : 'Barco principal', implicit: true });
+  // El principal existe si no tiene ficha, o si por borrados cruzados no quedara ninguno
+  const entry = repo.state[BOATS].find((b) => b.id === PRINCIPAL);
+  if (!entry || !list.length) {
+    list.push({ id: PRINCIPAL, name: repo.boatId === PRINCIPAL ? settings().boatName : entry?.name || 'Barco principal', implicit: true });
   }
   return list.sort((a, b) => (a.id === PRINCIPAL ? -1 : b.id === PRINCIPAL ? 1 : (a.createdAt || '').localeCompare(b.createdAt || '')));
 }
 
-// Barco elegido en este dispositivo, por modo (local o cuenta)
+// Barco elegido, por modo (local o cuenta). Cada pestaña recuerda el suyo (sessionStorage);
+// el último elegido en el dispositivo (localStorage) es el de las pestañas nuevas.
 const boatKey = (mode) => `velero.boat.${mode}`;
-export const savedBoat = (mode) => localStorage.getItem(boatKey(mode)) || PRINCIPAL;
+const store = (s, fn) => { try { return fn(s); } catch { return null; } };
+export const savedBoat = (mode) =>
+  store(sessionStorage, (s) => s.getItem(boatKey(mode))) || store(localStorage, (s) => s.getItem(boatKey(mode))) || PRINCIPAL;
 
 export async function switchBoat(id) {
-  localStorage.setItem(boatKey(repo.sync.mode), id);
+  for (const s of [sessionStorage, localStorage]) store(s, (x) => x.setItem(boatKey(repo.sync.mode), id));
   await repo.selectBoat(id);
 }
 

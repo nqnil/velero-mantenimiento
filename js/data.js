@@ -12,7 +12,7 @@ let preparedKey = '';
 export async function prepareBoat() {
   const s = repo.sync;
   const key = `${s.mode}|${s.email || ''}|${repo.boatId}`;
-  if (preparedKey === key || !s.serverConfirmed || !s.boatsConfirmed) return;
+  if (preparedKey === key || s.loading || !s.serverConfirmed || !s.boatsConfirmed) return;
   // Un barco nuevo sin ajustes todavía se está creando: lo prepara quien lo crea
   if (!find('meta', 'settings') && repo.boatId !== PRINCIPAL) return;
   preparedKey = key;
@@ -21,7 +21,8 @@ export async function prepareBoat() {
 }
 
 // Añade las tareas del catálogo que falten (también las que traigan versiones nuevas).
-async function ensureDefaults() {
+// También lo usa el alta de un barco nuevo, que no puede tener datos en otro sitio.
+export async function ensureDefaults() {
   if (find('meta', 'settings')?.seedDefaults === false) return migrateAreas();
   const deleted = new Set(settings().deletedDefaults || []);
   const have = new Set(repo.state.tasks.map((t) => t.id));
@@ -60,13 +61,14 @@ async function migrateAreas({ force = false } = {}) {
 
 // Fusiona datos (copia o modo local) con los actuales: añade lo que falta y
 // sustituye solo lo que sea más reciente. Descarta registros no válidos.
-export async function mergeData(data) {
+// sameBoat: la copia es de este barco (si no, no se le copia el nombre, modelo ni motor)
+export async function mergeData(data, { sameBoat = true } = {}) {
   let written = 0, skipped = 0;
   for (const c of COLLECTIONS) {
     for (const raw of Array.isArray(data[c]) ? data[c] : []) {
       const rec = sanitizeRecord(c, raw);
       if (!rec) { skipped++; continue; }
-      if (c === 'meta') { if (await mergeSettings(rec)) written++; continue; }
+      if (c === 'meta') { if (await mergeSettings(rec, sameBoat)) written++; continue; }
       const cur = find(c, rec.id);
       if (cur && (cur.updatedAt || '') >= (rec.updatedAt || '')) continue;
       await repo.put(c, rec, { touch: false });
@@ -83,16 +85,18 @@ export async function mergeData(data) {
     if (taskById(id)?.builtin) await repo.del('tasks', id);
   }
   await migrateAreas({ force: true });
+  await syncBoatEntry();
   return { written, skipped };
 }
 
 // Ajustes: campo a campo (gana el más reciente o el que falte) y las tareas borradas se suman
-async function mergeSettings(rec) {
+async function mergeSettings(rec, sameBoat) {
   const cur = find('meta', 'settings') || { id: 'settings' };
   const newer = (rec.updatedAt || '') > (cur.updatedAt || '');
   const out = { ...cur };
   let changed = false;
-  for (const k of ['boatName', 'boatModel', 'engine', 'noticeHours', 'noticeDays']) {
+  const fields = [...(sameBoat ? ['boatName', 'boatModel', 'engine'] : []), 'noticeHours', 'noticeDays', 'seedDefaults'];
+  for (const k of fields) {
     if (rec[k] === undefined) continue;
     if ((cur[k] === undefined || newer) && cur[k] !== rec[k]) { out[k] = rec[k]; changed = true; }
   }
@@ -115,17 +119,21 @@ export async function backupData(version) {
       else missing++;
     }
   }
-  const data = { app: 'velero-mantenimiento', version, exportedAt: new Date().toISOString(), photos };
+  const data = { app: 'velero-mantenimiento', version, boatId: repo.boatId, exportedAt: new Date().toISOString(), photos };
   for (const c of COLLECTIONS) data[c] = repo.state[c];
   return { data, missing };
 }
 
 // Mantiene la ficha del barco abierto en la lista de barcos (nombre, modelo y motor de sus ajustes)
+// Solo con la lista de barcos confirmada, y sin tocar la marca de borrado (en la nube se
+// escribe fusionando campos): así no se resucita un barco borrado en otro dispositivo.
 export async function syncBoatEntry() {
+  if (!repo.sync.boatsConfirmed || !find('meta', 'settings') && repo.boatId !== PRINCIPAL) return;
   const st = settings();
   const cur = find(BOATS, repo.boatId);
   if (cur?.deleted) return;
   const want = { name: st.boatName, model: st.boatModel || '', engine: st.engine || '' };
   if (cur && cur.name === want.name && cur.model === want.model && cur.engine === want.engine) return;
-  await repo.put(BOATS, { ...(cur || { id: repo.boatId, createdAt: now() }), ...want, deleted: false });
+  const { deleted, ...rest } = cur || { id: repo.boatId, createdAt: now() };
+  await repo.put(BOATS, { ...rest, ...want });
 }

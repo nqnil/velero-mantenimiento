@@ -259,7 +259,7 @@ async function saveIssueClose(d) {
   const hours = readHours(d.engineHours, d.doneDate, 'Las horas de motor no son válidas.');
   if (hours === undefined) return;
   await savePhotos(d, i.id);
-  await repo.put('issues', { ...i, status: 'hecho', doneDate: d.doneDate, work: d.work.trim(), engineHours: hours, ...costRecord(d) });
+  await repo.put('issues', { ...i, status: 'hecho', doneDate: d.doneDate, doneAt: (i.status === 'hecho' && i.doneAt) || now(), work: d.work.trim(), engineHours: hours, ...costRecord(d) });
   finishForm(d.wasDone ? 'Cambios guardados' : 'Correctivo hecho', idPath('correctivo', i.id));
 }
 
@@ -274,7 +274,7 @@ export const actions = {
     const i = issueById(el.dataset.id);
     if (!i || !confirm('¿Volver a ponerlo como pendiente? Se borrará el trabajo apuntado, su coste y la factura.')) return;
     await deletePhotos(i.photoIds);
-    await repo.put('issues', { ...i, status: 'pendiente', doneDate: '', work: '', engineHours: null, ...costRecord(costDraft(null)) });
+    await repo.put('issues', { ...i, status: 'pendiente', doneDate: '', doneAt: '', work: '', engineHours: null, ...costRecord(costDraft(null)) });
     toast('Vuelve a estar pendiente');
     render(true);
   },

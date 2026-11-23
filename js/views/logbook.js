@@ -1,7 +1,7 @@
 // Bitácora de navegaciones y repostajes de combustible.
 
 import { repo, esc, idPath, link, find, now, byDateDesc, fmtNum, fmtInput, LONG_DATE } from '../core.js';
-import { todayStr, currentHours, daysBetween, tripEngineHours, tripDays, tripStats, isNum, num, parseNum, round1, round2, fmtDate, fmtMoney, fmtHours } from '../logic.js';
+import { todayStr, currentHours, engineChanges, daysBetween, tripEngineHours, tripDays, tripStats, isNum, num, parseNum, round1, round2, fmtDate, fmtMoney, fmtHours } from '../logic.js';
 import { uid } from '../store.js';
 import { useDraft, currentDraft, check, dateRequired, optNumber, readHours, hoursField, bindDraftForm, finishForm, confirmDelete } from '../forms.js';
 import { backLink, notFound, facts, html, logRow, metaText, metaMoney, years, pickYear, yearChips, notes, formEnd, deleteButton } from '../ui.js';
@@ -281,7 +281,9 @@ async function saveTrip(d) {
   }
   const hs = optNumber(d.hoursStart, 'Las horas al salir no son un número válido.');
   const he = optNumber(d.hoursEnd, 'Las horas al volver no son un número válido.');
-  if (hs !== null && he !== null) {
+  // Si se cambió el motor durante la travesía, las horas de salida y llegada no se comparan
+  const crossesChange = engineChanges(repo.state).some((c) => c.date >= d.date && c.date <= (d.endDate || d.date));
+  if (hs !== null && he !== null && !crossesChange) {
     check(he >= hs, 'Las horas al volver no pueden ser menores que al salir.');
     const days = d.endDate ? daysBetween(d.date, d.endDate) + 1 : 1;
     check(he - hs <= 24 * days, 'Hay más horas de motor que horas tiene la travesía: revisa el contador.');

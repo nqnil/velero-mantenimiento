@@ -423,8 +423,8 @@ legend { font-weight: 700; padding: 0 6px; display: flex; align-items: center; g
 .boatlink {
   font-weight: 700; font-size: 0.95rem; color: var(--ink); text-decoration: none;
   display: inline-flex; align-items: center; gap: 4px; min-height: 32px; max-width: 60vw;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.boatlink span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .boatlink::after { content: '▾'; color: var(--ink-2); font-size: 0.8em; }
 .boatlink[aria-current] { text-decoration: underline; }
 .choices li.boat { display: flex; gap: 8px; align-items: stretch; }

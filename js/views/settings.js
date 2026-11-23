@@ -82,8 +82,10 @@ async function saveBoat(form) {
   const nd = optNumber(fd.get('noticeDays'), 'Los avisos deben ser números (horas y días).');
   check(nh !== null && nd !== null, 'Los avisos deben ser números (horas y días).');
   const text = (k) => String(fd.get(k) || '').trim();
+  const name = text('boatName') || DEFAULT_SETTINGS.boatName;
+  check(!boats().some((b) => b.id !== repo.boatId && b.name.toLowerCase() === name.toLowerCase()), 'Ya tienes otro barco con ese nombre.');
   await saveSettings({
-    boatName: text('boatName') || DEFAULT_SETTINGS.boatName,
+    boatName: name,
     boatModel: text('boatModel'),
     engine: text('engine'),
     noticeHours: Math.round(nh),
@@ -197,7 +199,8 @@ async function importBackup(file) {
   if (!confirm(`La copia tiene ${len('interventions')} intervenciones, ${len('issues')} correctivos, ${len('trips')} navegaciones y ${len('fuel')} repostajes. Se añadirá lo que falte y se actualizará lo que en la copia sea más reciente. ¿Continuar?`)) return;
   toast('Importando…');
   try {
-    const res = await mergeData(data);
+    const sameBoat = (data.boatId || PRINCIPAL) === repo.boatId;
+    const res = await mergeData(data, { sameBoat });
     toast(`Copia importada (${res.written} registros).${res.skipped ? ` ${res.skipped} no eran válidos y se han descartado.` : ''}`);
   } catch (e) {
     console.error(e);
@@ -243,7 +246,7 @@ function offerShare(file, title) {
 export const actions = {
   'export-ics': async () => {
     const st = settings();
-    const ics = buildICS(allStatuses(repo.state, st), st);
+    const ics = buildICS(allStatuses(repo.state, st), st, { boatId: repo.boatId });
     if (!ics.includes('BEGIN:VEVENT')) { toast('No hay fechas próximas: registra antes alguna intervención.'); return; }
     await shareOrDownload(new Blob([ics], { type: 'text/calendar' }), 'mantenimiento-velero.ics', 'Mantenimiento del velero');
   },

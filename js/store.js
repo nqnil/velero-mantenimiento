@@ -69,7 +69,9 @@ class LocalBackend {
     this.cols = cols;
   }
   async start(onData) {
-    this.db = await openIDB(this.name);
+    const db = await openIDB(this.name);
+    if (this.stopped) { db.close(); return; } // se cerró mientras se abría
+    this.db = db;
     this.onData = onData;
     await this.reload();
     this.onMessage = (e) => {
@@ -104,6 +106,7 @@ class LocalBackend {
     for (const c of COLLECTIONS) channel?.postMessage({ db: this.name, col: c });
   }
   stop() {
+    this.stopped = true;
     if (this.onMessage) channel?.removeEventListener('message', this.onMessage);
     this.db?.close();
   }
@@ -197,8 +200,10 @@ class CloudBackend {
   }
   // Las escrituras se aplican al instante en la caché local; no esperamos al servidor
   // (sin cobertura, la promesa no se resolvería hasta sincronizar).
+  // La lista de barcos se escribe fusionando campos: así cambiar el nombre en un dispositivo
+  // no deshace un borrado hecho en otro.
   put(col, obj) {
-    fb.setDoc(fb.doc(fbDb, this.path(col), obj.id), JSON.parse(JSON.stringify(obj))).catch((e) => console.error(e));
+    fb.setDoc(fb.doc(fbDb, this.path(col), obj.id), JSON.parse(JSON.stringify(obj)), col === BOATS ? { merge: true } : {}).catch((e) => console.error(e));
     return Promise.resolve();
   }
   del(col, id) {
@@ -265,7 +270,9 @@ export class Repo {
       this.sync.boatsConfirmed = s.serverConfirmed;
       this.emit();
     });
-    await this.selectBoat(boatId || PRINCIPAL);
+    // Un barco que ya no existe (o nunca existió aquí) no se abre: se crearía una base vacía
+    const ok = boatId === PRINCIPAL || this.state[BOATS].some((b) => b.id === boatId && !b.deleted);
+    await this.selectBoat(ok ? boatId : PRINCIPAL);
   }
   backend(boatId, cols) {
     return this.sync.mode === 'cloud' ? new CloudBackend(this.user, boatId, cols) : new LocalBackend(boatId, cols);
@@ -275,7 +282,8 @@ export class Repo {
     this.data?.stop();
     this.boatId = boatId;
     for (const c of COLLECTIONS) this.state[c] = [];
-    Object.assign(this.sync, { pending: false, serverConfirmed: this.sync.mode !== 'cloud' });
+    // loading: mientras llegan los datos, nadie debe sacar conclusiones de un estado vacío
+    Object.assign(this.sync, { pending: false, loading: true, serverConfirmed: this.sync.mode !== 'cloud' });
     const b = this.backend(boatId, COLLECTIONS);
     this.data = b;
     let started = false;
@@ -289,6 +297,7 @@ export class Repo {
       this.emit();
     });
     started = true;
+    if (this.data === b) this.sync.loading = false;
     this.emit();
   }
   target(col) {

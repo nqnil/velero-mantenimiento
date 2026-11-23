@@ -1,6 +1,6 @@
 // Horas de motor: lecturas del contador y cambios de motor (horas a cero).
 
-import { repo, esc, toast, render, idPath, now, settings, saveSettings, ICON, find } from '../core.js';
+import { repo, esc, toast, render, idPath, now, saveSettings, ICON, find } from '../core.js';
 import { todayStr, hourPoints, engineChanges, epochAt, currentHours, usageRate, fmtDate, fmtHours } from '../logic.js';
 import { uid } from '../store.js';
 import { check, dateRequired, optNumber, readHours, bindPlainForm, guarded, finishForm, confirmDelete } from '../forms.js';
@@ -82,7 +82,7 @@ export function viewEngineChange() {
   <form id="engine-form" class="form" novalidate>
     <label>Fecha del cambio<input type="date" name="date" value="${todayStr()}" max="${todayStr()}" required></label>
     <label>Horas finales del motor anterior <span class="muted">(opcional)</span><input type="text" name="oldHours" inputmode="decimal" placeholder="${cur ? esc(`Última: ${cur.hours.toLocaleString('es-ES')}`) : ''}"></label>
-    <label>Motor nuevo<input type="text" name="engine" value="" placeholder="${esc(settings().engine || 'Marca y modelo')}"></label>
+    <label>Motor nuevo<input type="text" name="engine" value="" placeholder="Marca y modelo"></label>
     <label>Horas con las que empieza<input type="text" name="startHours" inputmode="decimal" value="0"></label>
     <p class="hint">Si el motor nuevo es usado o el contador no está a cero, pon lo que marque.</p>
     ${formEnd('Guardar cambio de motor')}

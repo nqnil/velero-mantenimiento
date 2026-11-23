@@ -129,7 +129,7 @@ function updateHeader() {
   $sync.textContent = txt;
   $sync.className = 'sync ' + cls;
   const many = boats().length > 1;
-  $boat.textContent = settings().boatName;
+  $boat.querySelector('span').textContent = settings().boatName;
   $boat.title = many ? 'Cambiar de barco' : 'Barcos';
   $boat.classList.toggle('many', many);
 }
@@ -140,11 +140,14 @@ async function checkBoatGone() {
   if (leaving || !repo.sync.boatsConfirmed) return;
   if (!repo.state[BOATS].find((b) => b.id === repo.boatId)?.deleted) return;
   leaving = true;
-  const next = boats()[0]?.id || PRINCIPAL;
-  await switchBoat(next);
+  // Lo que hubiera a medio escribir era de ese barco: se descarta sin preguntar
+  discardDraft(location.hash);
+  forgetOtherDrafts();
+  await switchBoat(boats().find((b) => b.id !== repo.boatId)?.id || PRINCIPAL);
   leaving = false;
   toast('El barco que tenías abierto se ha borrado en otro dispositivo.');
-  location.hash = '#/';
+  currentHash = '#/';
+  if (location.hash === '#/' || location.hash === '') render(true); else location.hash = '#/';
 }
 
 // ───────────────────────── Acciones (botones con data-action) ─────────────────────────
